@@ -6,12 +6,15 @@
 
 package runtime
 
-import "unsafe"
+import (
+	"internal/abi"
+	"unsafe"
+)
 
 // tflag is documented in reflect/type.go.
 //
 // tflag values must be kept in sync with copies in:
-//	cmd/compile/internal/gc/reflect.go
+//	cmd/compile/internal/reflectdata/reflect.go
 //	cmd/link/internal/ld/decodesym.go
 //	reflect/type.go
 //      internal/reflectlite/type.go
@@ -25,7 +28,7 @@ const (
 )
 
 // Needs to be in sync with ../cmd/link/internal/ld/decodesym.go:/^func.commonsize,
-// ../cmd/compile/internal/gc/reflect.go:/^func.dcommontype and
+// ../cmd/compile/internal/reflectdata/reflect.go:/^func.dcommontype and
 // ../reflect/type.go:/^type.rtype.
 // ../internal/reflectlite/type.go:/^type.rtype.
 type _type struct {
@@ -262,7 +265,7 @@ func (t *_type) textOff(off textOff) unsafe.Pointer {
 	if off == -1 {
 		// -1 is the sentinel value for unreachable code.
 		// See cmd/link/internal/ld/data.go:relocsym.
-		return unsafe.Pointer(funcPC(unreachableMethod))
+		return unsafe.Pointer(abi.FuncPCABIInternal(unreachableMethod))
 	}
 	base := uintptr(unsafe.Pointer(t))
 	var md *moduledata
@@ -285,34 +288,7 @@ func (t *_type) textOff(off textOff) unsafe.Pointer {
 		}
 		return res
 	}
-	res := uintptr(0)
-
-	// The text, or instruction stream is generated as one large buffer.  The off (offset) for a method is
-	// its offset within this buffer.  If the total text size gets too large, there can be issues on platforms like ppc64 if
-	// the target of calls are too far for the call instruction.  To resolve the large text issue, the text is split
-	// into multiple text sections to allow the linker to generate long calls when necessary.  When this happens, the vaddr
-	// for each text section is set to its offset within the text.  Each method's offset is compared against the section
-	// vaddrs and sizes to determine the containing section.  Then the section relative offset is added to the section's
-	// relocated baseaddr to compute the method addess.
-
-	if len(md.textsectmap) > 1 {
-		for i := range md.textsectmap {
-			sectaddr := md.textsectmap[i].vaddr
-			sectlen := md.textsectmap[i].length
-			if uintptr(off) >= sectaddr && uintptr(off) < sectaddr+sectlen {
-				res = md.textsectmap[i].baseaddr + uintptr(off) - uintptr(md.textsectmap[i].vaddr)
-				break
-			}
-		}
-	} else {
-		// single text section
-		res = md.text + uintptr(off)
-	}
-
-	if res > md.etext && GOARCH != "wasm" { // on wasm, functions do not live in the same address space as the linear memory
-		println("runtime: textOff", hex(off), "out of range", hex(md.text), "-", hex(md.etext))
-		throw("runtime: text offset out of range")
-	}
+	res := md.textAddr(uint32(off))
 	return unsafe.Pointer(res)
 }
 
@@ -383,7 +359,7 @@ type maptype struct {
 }
 
 // Note: flag values must match those used in the TMAP case
-// in ../cmd/compile/internal/gc/reflect.go:writeType.
+// in ../cmd/compile/internal/reflectdata/reflect.go:writeType.
 func (mt *maptype) indirectkey() bool { // store ptr to key instead of key itself
 	return mt.flags&1 != 0
 }
