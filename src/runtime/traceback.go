@@ -7,7 +7,6 @@ package runtime
 import (
 	"internal/bytealg"
 	"internal/goarch"
-	"runtime/internal/atomic"
 	"runtime/internal/sys"
 	"unsafe"
 )
@@ -82,6 +81,7 @@ func gentraceback(pc0, sp0, lr0 uintptr, gp *g, skip int, pcbuf *uintptr, max in
 	}
 	waspanic := false
 	cgoCtxt := gp.cgoCtxt
+	stack := gp.stack
 	printing := pcbuf == nil && callback == nil
 
 	// If the PC is zero, it's likely a nil function call.
@@ -113,8 +113,8 @@ func gentraceback(pc0, sp0, lr0 uintptr, gp *g, skip int, pcbuf *uintptr, max in
 	f := findfunc(frame.pc)
 	if !f.valid() {
 		if callback != nil || printing {
-			print("runtime: unknown pc ", hex(frame.pc), "\n")
-			tracebackHexdump(gp.stack, &frame, 0)
+			print("runtime: g ", gp.goid, ": unknown pc ", hex(frame.pc), "\n")
+			tracebackHexdump(stack, &frame, 0)
 		}
 		if callback != nil {
 			throw("unknown pc")
@@ -174,12 +174,15 @@ func gentraceback(pc0, sp0, lr0 uintptr, gp *g, skip int, pcbuf *uintptr, max in
 					frame.fn = findfunc(frame.pc)
 					f = frame.fn
 					flag = f.flag
+					frame.lr = gp.m.curg.sched.lr
 					frame.sp = gp.m.curg.sched.sp
+					stack = gp.m.curg.stack
 					cgoCtxt = gp.m.curg.cgoCtxt
 				case funcID_systemstack:
 					// systemstack returns normally, so just follow the
 					// stack transition.
 					frame.sp = gp.m.curg.sched.sp
+					stack = gp.m.curg.stack
 					cgoCtxt = gp.m.curg.cgoCtxt
 					flag &^= funcFlag_SPWRITE
 				}
@@ -247,8 +250,8 @@ func gentraceback(pc0, sp0, lr0 uintptr, gp *g, skip int, pcbuf *uintptr, max in
 					doPrint = false
 				}
 				if callback != nil || doPrint {
-					print("runtime: unexpected return pc for ", funcname(f), " called from ", hex(frame.lr), "\n")
-					tracebackHexdump(gp.stack, &frame, lrPtr)
+					print("runtime: g ", gp.goid, ": unexpected return pc for ", funcname(f), " called from ", hex(frame.lr), "\n")
+					tracebackHexdump(stack, &frame, lrPtr)
 				}
 				if callback != nil {
 					throw("unknown caller pc")
@@ -447,7 +450,7 @@ func gentraceback(pc0, sp0, lr0 uintptr, gp *g, skip int, pcbuf *uintptr, max in
 				if frame.pc > f.entry() {
 					print(" +", hex(frame.pc-f.entry()))
 				}
-				if gp.m != nil && gp.m.throwing > 0 && gp == gp.m.curg || level >= 2 {
+				if gp.m != nil && gp.m.throwing >= throwTypeRuntime && gp == gp.m.curg || level >= 2 {
 					print(" fp=", hex(frame.fp), " sp=", hex(frame.sp), " pc=", hex(frame.pc))
 				}
 				print("\n")
@@ -470,11 +473,18 @@ func gentraceback(pc0, sp0, lr0 uintptr, gp *g, skip int, pcbuf *uintptr, max in
 		}
 
 		waspanic = f.funcID == funcID_sigpanic
-		injectedCall := waspanic || f.funcID == funcID_asyncPreempt
+		injectedCall := waspanic || f.funcID == funcID_asyncPreempt || f.funcID == funcID_debugCallV2
 
 		// Do not unwind past the bottom of the stack.
 		if !flr.valid() {
 			break
+		}
+
+		if frame.pc == frame.lr && frame.sp == frame.fp {
+			// If the next frame is identical to the current frame, we cannot make progress.
+			print("runtime: traceback stuck. pc=", hex(frame.pc), " sp=", hex(frame.sp), "\n")
+			tracebackHexdump(stack, &frame, frame.sp)
+			throw("traceback stuck")
 		}
 
 		// Unwind to next frame.
@@ -808,10 +818,10 @@ func traceback1(pc, sp, lr uintptr, gp *g, flags uint) {
 		// concurrently with a signal handler.
 		// We just have to stop a signal handler from interrupting
 		// in the middle of our copy.
-		atomic.Store(&gp.m.cgoCallersUse, 1)
+		gp.m.cgoCallersUse.Store(1)
 		cgoCallers := *gp.m.cgoCallers
 		gp.m.cgoCallers[0] = 0
-		atomic.Store(&gp.m.cgoCallersUse, 0)
+		gp.m.cgoCallersUse.Store(0)
 
 		printCgoTraceback(&cgoCallers)
 	}
@@ -912,8 +922,8 @@ func gcallers(gp *g, skip int, pcbuf []uintptr) int {
 // showframe reports whether the frame with the given characteristics should
 // be printed during a traceback.
 func showframe(f funcInfo, gp *g, firstFrame bool, funcID, childID funcID) bool {
-	g := getg()
-	if g.m.throwing > 0 && gp != nil && (gp == g.m.curg || gp == g.m.caughtsig.ptr()) {
+	mp := getg().m
+	if mp.throwing >= throwTypeRuntime && gp != nil && (gp == mp.curg || gp == mp.caughtsig.ptr()) {
 		return true
 	}
 	return showfuncinfo(f, firstFrame, funcID, childID)
@@ -1040,10 +1050,10 @@ func tracebackothers(me *g) {
 		}
 		print("\n")
 		goroutineheader(gp)
-		// Note: gp.m == g.m occurs when tracebackothers is
-		// called from a signal handler initiated during a
-		// systemstack call. The original G is still in the
-		// running state, and we want to print its stack.
+		// Note: gp.m == getg().m occurs when tracebackothers is called
+		// from a signal handler initiated during a systemstack call.
+		// The original G is still in the running state, and we want to
+		// print its stack.
 		if gp.m != getg().m && readgstatus(gp)&^_Gscan == _Grunning {
 			print("\tgoroutine running on other thread; stack unavailable\n")
 			printcreatedby(gp)
@@ -1109,7 +1119,7 @@ func tracebackHexdump(stk stack, frame *stkframe, bad uintptr) {
 // system (that is, the finalizer goroutine) is considered a user
 // goroutine.
 func isSystemGoroutine(gp *g, fixed bool) bool {
-	// Keep this in sync with cmd/trace/trace.go:isSystemGoroutine.
+	// Keep this in sync with internal/trace.IsSystemGoroutine.
 	f := findfunc(gp.startpc)
 	if !f.valid() {
 		return false
@@ -1229,9 +1239,9 @@ func isSystemGoroutine(gp *g, fixed bool) bool {
 //
 // On all platforms, the traceback function is invoked when a call from
 // Go to C to Go requests a stack trace. On linux/amd64, linux/ppc64le,
-// and freebsd/amd64, the traceback function is also invoked when a
-// signal is received by a thread that is executing a cgo call. The
-// traceback function should not make assumptions about when it is
+// linux/arm64, and freebsd/amd64, the traceback function is also invoked
+// when a signal is received by a thread that is executing a cgo call.
+// The traceback function should not make assumptions about when it is
 // called, as future versions of Go may make additional calls.
 //
 // The symbolizer function will be called with a single argument, a
@@ -1396,7 +1406,7 @@ func printOneCgoTraceback(pc uintptr, max int, arg *cgoSymbolizerArg) int {
 // callCgoSymbolizer calls the cgoSymbolizer function.
 func callCgoSymbolizer(arg *cgoSymbolizerArg) {
 	call := cgocall
-	if panicking > 0 || getg().m.curg != getg() {
+	if panicking.Load() > 0 || getg().m.curg != getg() {
 		// We do not want to call into the scheduler when panicking
 		// or when on the system stack.
 		call = asmcgocall
@@ -1416,7 +1426,7 @@ func cgoContextPCs(ctxt uintptr, buf []uintptr) {
 		return
 	}
 	call := cgocall
-	if panicking > 0 || getg().m.curg != getg() {
+	if panicking.Load() > 0 || getg().m.curg != getg() {
 		// We do not want to call into the scheduler when panicking
 		// or when on the system stack.
 		call = asmcgocall

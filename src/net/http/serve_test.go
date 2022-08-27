@@ -20,6 +20,7 @@ import (
 	"io"
 	"log"
 	"math/rand"
+	"mime/multipart"
 	"net"
 	. "net/http"
 	"net/http/httptest"
@@ -3035,6 +3036,13 @@ func testRequestBodyLimit(t *testing.T, h2 bool) {
 		if n != limit {
 			t.Errorf("io.Copy = %d, want %d", n, limit)
 		}
+		mbErr, ok := err.(*MaxBytesError)
+		if !ok {
+			t.Errorf("expected MaxBytesError, got %T", err)
+		}
+		if mbErr.Limit != limit {
+			t.Errorf("MaxBytesError.Limit = %d, want %d", mbErr.Limit, limit)
+		}
 	}))
 	defer cst.close()
 
@@ -3484,6 +3492,37 @@ func TestOptions(t *testing.T) {
 	}
 }
 
+func TestOptionsHandler(t *testing.T) {
+	rc := make(chan *Request, 1)
+
+	ts := httptest.NewUnstartedServer(HandlerFunc(func(w ResponseWriter, r *Request) {
+		rc <- r
+	}))
+	ts.Config.DisableGeneralOptionsHandler = true
+	ts.Start()
+	defer ts.Close()
+
+	conn, err := net.Dial("tcp", ts.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	_, err = conn.Write([]byte("OPTIONS * HTTP/1.1\r\nHost: foo.com\r\n\r\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case got := <-rc:
+		if got.Method != "OPTIONS" || got.RequestURI != "*" {
+			t.Errorf("Expected OPTIONS * request, got %v", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Error("timeout")
+	}
+}
+
 // Tests regarding the ordering of Write, WriteHeader, Header, and
 // Flush calls. In Go 1.0, rw.WriteHeader immediately flushed the
 // (*response).header to the wire. In Go 1.1, the actual wire flush is
@@ -3866,7 +3905,7 @@ func testServerReaderFromOrder(t *testing.T, h2 bool) {
 
 // Issue 6157, Issue 6685
 func TestCodesPreventingContentTypeAndBody(t *testing.T) {
-	for _, code := range []int{StatusNotModified, StatusNoContent, StatusContinue} {
+	for _, code := range []int{StatusNotModified, StatusNoContent} {
 		ht := newHandlerTest(HandlerFunc(func(w ResponseWriter, r *Request) {
 			if r.URL.Path == "/header" {
 				w.Header().Set("Content-Length", "123")
@@ -4877,11 +4916,7 @@ func TestServerRequestContextCancel_ConnClose(t *testing.T) {
 	handlerDone := make(chan struct{})
 	ts := httptest.NewServer(HandlerFunc(func(w ResponseWriter, r *Request) {
 		close(inHandler)
-		select {
-		case <-r.Context().Done():
-		case <-time.After(3 * time.Second):
-			t.Errorf("timeout waiting for context to be done")
-		}
+		<-r.Context().Done()
 		close(handlerDone)
 	}))
 	defer ts.Close()
@@ -4891,18 +4926,9 @@ func TestServerRequestContextCancel_ConnClose(t *testing.T) {
 	}
 	defer c.Close()
 	io.WriteString(c, "GET / HTTP/1.1\r\nHost: foo\r\n\r\n")
-	select {
-	case <-inHandler:
-	case <-time.After(3 * time.Second):
-		t.Fatalf("timeout waiting to see ServeHTTP get called")
-	}
+	<-inHandler
 	c.Close() // this should trigger the context being done
-
-	select {
-	case <-handlerDone:
-	case <-time.After(4 * time.Second):
-		t.Fatalf("timeout waiting to see ServeHTTP exit")
-	}
+	<-handlerDone
 }
 
 func TestServerContext_ServerContextKey_h1(t *testing.T) {
@@ -5077,10 +5103,11 @@ func benchmarkClientServerParallel(b *testing.B, parallelism int, useTLS bool) {
 // The client code runs in a subprocess.
 //
 // For use like:
-//   $ go test -c
-//   $ ./http.test -test.run=XX -test.bench=BenchmarkServer -test.benchtime=15s -test.cpuprofile=http.prof
-//   $ go tool pprof http.test http.prof
-//   (pprof) web
+//
+//	$ go test -c
+//	$ ./http.test -test.run=XX -test.bench=BenchmarkServer -test.benchtime=15s -test.cpuprofile=http.prof
+//	$ go tool pprof http.test http.prof
+//	(pprof) web
 func BenchmarkServer(b *testing.B) {
 	b.ReportAllocs()
 	// Child process mode;
@@ -6250,6 +6277,7 @@ func TestUnsupportedTransferEncodingsReturn501(t *testing.T) {
 		"fugazi",
 		"foo-bar",
 		"unknown",
+		"\rchunked",
 	}
 
 	for _, badTE := range unsupportedTEs {
@@ -6728,5 +6756,102 @@ func testMaxBytesHandler(t *testing.T, maxSize, requestSize int64) {
 	}
 	if buf.Len() != int(handlerN) {
 		t.Errorf("expected echo of size %d; got %d", handlerN, buf.Len())
+	}
+}
+
+func TestEarlyHints(t *testing.T) {
+	ht := newHandlerTest(HandlerFunc(func(w ResponseWriter, r *Request) {
+		h := w.Header()
+		h.Add("Link", "</style.css>; rel=preload; as=style")
+		h.Add("Link", "</script.js>; rel=preload; as=script")
+		w.WriteHeader(StatusEarlyHints)
+
+		h.Add("Link", "</foo.js>; rel=preload; as=script")
+		w.WriteHeader(StatusEarlyHints)
+
+		w.Write([]byte("stuff"))
+	}))
+
+	got := ht.rawResponse("GET / HTTP/1.1\nHost: golang.org")
+	expected := "HTTP/1.1 103 Early Hints\r\nLink: </style.css>; rel=preload; as=style\r\nLink: </script.js>; rel=preload; as=script\r\n\r\nHTTP/1.1 103 Early Hints\r\nLink: </style.css>; rel=preload; as=style\r\nLink: </script.js>; rel=preload; as=script\r\nLink: </foo.js>; rel=preload; as=script\r\n\r\nHTTP/1.1 200 OK\r\nLink: </style.css>; rel=preload; as=style\r\nLink: </script.js>; rel=preload; as=script\r\nLink: </foo.js>; rel=preload; as=script\r\nDate: " // dynamic content expected
+	if !strings.Contains(got, expected) {
+		t.Errorf("unexpected response; got %q; should start by %q", got, expected)
+	}
+}
+func TestProcessing(t *testing.T) {
+	ht := newHandlerTest(HandlerFunc(func(w ResponseWriter, r *Request) {
+		w.WriteHeader(StatusProcessing)
+		w.Write([]byte("stuff"))
+	}))
+
+	got := ht.rawResponse("GET / HTTP/1.1\nHost: golang.org")
+	expected := "HTTP/1.1 102 Processing\r\n\r\nHTTP/1.1 200 OK\r\nDate: " // dynamic content expected
+	if !strings.Contains(got, expected) {
+		t.Errorf("unexpected response; got %q; should start by %q", got, expected)
+	}
+}
+
+func TestParseFormCleanup_h1(t *testing.T) { testParseFormCleanup(t, h1Mode) }
+func TestParseFormCleanup_h2(t *testing.T) {
+	t.Skip("https://go.dev/issue/20253")
+	testParseFormCleanup(t, h2Mode)
+}
+
+func testParseFormCleanup(t *testing.T, h2 bool) {
+	const maxMemory = 1024
+	const key = "file"
+
+	if runtime.GOOS == "windows" {
+		// Windows sometimes refuses to remove a file that was just closed.
+		t.Skip("https://go.dev/issue/25965")
+	}
+
+	setParallel(t)
+	defer afterTest(t)
+	cst := newClientServerTest(t, h2, HandlerFunc(func(w ResponseWriter, r *Request) {
+		r.ParseMultipartForm(maxMemory)
+		f, _, err := r.FormFile(key)
+		if err != nil {
+			t.Errorf("r.FormFile(%q) = %v", key, err)
+			return
+		}
+		of, ok := f.(*os.File)
+		if !ok {
+			t.Errorf("r.FormFile(%q) returned type %T, want *os.File", key, f)
+			return
+		}
+		w.Write([]byte(of.Name()))
+	}))
+	defer cst.close()
+
+	fBuf := new(bytes.Buffer)
+	mw := multipart.NewWriter(fBuf)
+	mf, err := mw.CreateFormFile(key, "myfile.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mf.Write(bytes.Repeat([]byte("A"), maxMemory*2)); err != nil {
+		t.Fatal(err)
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	req, err := NewRequest("POST", cst.ts.URL, fBuf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	res, err := cst.c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	fname, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cst.close()
+	if _, err := os.Stat(string(fname)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("file %q exists after HTTP handler returned", string(fname))
 	}
 }

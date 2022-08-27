@@ -28,6 +28,16 @@ import (
 	"time"
 )
 
+func TestMain(m *testing.M) {
+	if Getenv("GO_OS_TEST_DRAIN_STDIN") == "1" {
+		os.Stdout.Close()
+		io.Copy(io.Discard, os.Stdin)
+		Exit(0)
+	}
+
+	Exit(m.Run())
+}
+
 var dot = []string{
 	"dir_unix.go",
 	"env.go",
@@ -54,34 +64,31 @@ var sysdir = func() *sysDir {
 				"libpowermanager.so",
 			},
 		}
-	case "darwin", "ios":
-		switch runtime.GOARCH {
-		case "arm64":
-			wd, err := syscall.Getwd()
-			if err != nil {
-				wd = err.Error()
-			}
-			sd := &sysDir{
-				filepath.Join(wd, "..", ".."),
-				[]string{
-					"ResourceRules.plist",
-					"Info.plist",
-				},
-			}
-			found := true
-			for _, f := range sd.files {
-				path := filepath.Join(sd.name, f)
-				if _, err := Stat(path); err != nil {
-					found = false
-					break
-				}
-			}
-			if found {
-				return sd
-			}
-			// In a self-hosted iOS build the above files might
-			// not exist. Look for system files instead below.
+	case "ios":
+		wd, err := syscall.Getwd()
+		if err != nil {
+			wd = err.Error()
 		}
+		sd := &sysDir{
+			filepath.Join(wd, "..", ".."),
+			[]string{
+				"ResourceRules.plist",
+				"Info.plist",
+			},
+		}
+		found := true
+		for _, f := range sd.files {
+			path := filepath.Join(sd.name, f)
+			if _, err := Stat(path); err != nil {
+				found = false
+				break
+			}
+		}
+		if found {
+			return sd
+		}
+		// In a self-hosted iOS build the above files might
+		// not exist. Look for system files instead below.
 	case "windows":
 		return &sysDir{
 			Getenv("SystemRoot") + "\\system32\\drivers\\etc",
@@ -140,13 +147,8 @@ func equal(name1, name2 string) (r bool) {
 // localTmp returns a local temporary directory not on NFS.
 func localTmp() string {
 	switch runtime.GOOS {
-	case "android", "windows":
+	case "android", "ios", "windows":
 		return TempDir()
-	case "darwin", "ios":
-		switch runtime.GOARCH {
-		case "arm64":
-			return TempDir()
-		}
 	}
 	return "/tmp"
 }
@@ -218,6 +220,29 @@ func TestStatError(t *testing.T) {
 	}
 	if perr, ok := err.(*PathError); !ok {
 		t.Errorf("got %T, want %T", err, perr)
+	}
+}
+
+func TestStatSymlinkLoop(t *testing.T) {
+	testenv.MustHaveSymlink(t)
+
+	defer chtmpdir(t)()
+
+	err := os.Symlink("x", "y")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove("y")
+
+	err = os.Symlink("y", "x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove("x")
+
+	_, err = os.Stat("x")
+	if _, ok := err.(*fs.PathError); !ok {
+		t.Errorf("expected *PathError, got %T: %v\n", err, err)
 	}
 }
 
@@ -570,15 +595,12 @@ func TestReaddirnamesOneAtATime(t *testing.T) {
 	switch runtime.GOOS {
 	case "android":
 		dir = "/system/bin"
-	case "darwin", "ios":
-		switch runtime.GOARCH {
-		case "arm64":
-			wd, err := Getwd()
-			if err != nil {
-				t.Fatal(err)
-			}
-			dir = wd
+	case "ios":
+		wd, err := Getwd()
+		if err != nil {
+			t.Fatal(err)
 		}
+		dir = wd
 	case "plan9":
 		dir = "/bin"
 	case "windows":
@@ -1399,22 +1421,19 @@ func TestChdirAndGetwd(t *testing.T) {
 		dirs = []string{"/system/bin"}
 	case "plan9":
 		dirs = []string{"/", "/usr"}
-	case "darwin", "ios":
-		switch runtime.GOARCH {
-		case "arm64":
-			dirs = nil
-			for _, d := range []string{"d1", "d2"} {
-				dir, err := os.MkdirTemp("", d)
-				if err != nil {
-					t.Fatalf("TempDir: %v", err)
-				}
-				// Expand symlinks so path equality tests work.
-				dir, err = filepath.EvalSymlinks(dir)
-				if err != nil {
-					t.Fatalf("EvalSymlinks: %v", err)
-				}
-				dirs = append(dirs, dir)
+	case "ios":
+		dirs = nil
+		for _, d := range []string{"d1", "d2"} {
+			dir, err := os.MkdirTemp("", d)
+			if err != nil {
+				t.Fatalf("TempDir: %v", err)
 			}
+			// Expand symlinks so path equality tests work.
+			dir, err = filepath.EvalSymlinks(dir)
+			if err != nil {
+				t.Fatalf("EvalSymlinks: %v", err)
+			}
+			dirs = append(dirs, dir)
 		}
 	}
 	oldwd := Getenv("PWD")
@@ -1680,16 +1699,21 @@ func runBinHostname(t *testing.T) string {
 		t.Fatal(err)
 	}
 	defer r.Close()
-	const path = "/bin/hostname"
+
+	path, err := osexec.LookPath("hostname")
+	if err != nil {
+		if errors.Is(err, osexec.ErrNotFound) {
+			t.Skip("skipping test; test requires hostname but it does not exist")
+		}
+		t.Fatal(err)
+	}
+
 	argv := []string{"hostname"}
 	if runtime.GOOS == "aix" {
 		argv = []string{"hostname", "-s"}
 	}
 	p, err := StartProcess(path, argv, &ProcAttr{Files: []*File{nil, w, Stderr}})
 	if err != nil {
-		if _, err := Stat(path); IsNotExist(err) {
-			t.Skipf("skipping test; test requires %s but it does not exist", path)
-		}
 		t.Fatal(err)
 	}
 	w.Close()
@@ -1717,7 +1741,7 @@ func runBinHostname(t *testing.T) string {
 
 func testWindowsHostname(t *testing.T, hostname string) {
 	cmd := osexec.Command("hostname")
-	out, err := cmd.CombinedOutput()
+	out, err := cmd.Output()
 	if err != nil {
 		t.Fatalf("Failed to execute hostname command: %v %s", err, out)
 	}
@@ -2273,9 +2297,18 @@ func testKillProcess(t *testing.T, processKiller func(p *Process)) {
 	testenv.MustHaveExec(t)
 	t.Parallel()
 
-	// Re-exec the test binary itself to emulate "sleep 1".
-	cmd := osexec.Command(Args[0], "-test.run", "TestSleep")
-	err := cmd.Start()
+	// Re-exec the test binary to start a process that hangs until stdin is closed.
+	cmd := osexec.Command(Args[0])
+	cmd.Env = append(os.Environ(), "GO_OS_TEST_DRAIN_STDIN=1")
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = cmd.Start()
 	if err != nil {
 		t.Fatalf("Failed to start test process: %v", err)
 	}
@@ -2284,19 +2317,14 @@ func testKillProcess(t *testing.T, processKiller func(p *Process)) {
 		if err := cmd.Wait(); err == nil {
 			t.Errorf("Test process succeeded, but expected to fail")
 		}
+		stdin.Close() // Keep stdin alive until the process has finished dying.
 	}()
 
-	time.Sleep(100 * time.Millisecond)
-	processKiller(cmd.Process)
-}
+	// Wait for the process to be started.
+	// (It will close its stdout when it reaches TestMain.)
+	io.Copy(io.Discard, stdout)
 
-// TestSleep emulates "sleep 1". It is a helper for testKillProcess, so we
-// don't have to rely on an external "sleep" command being available.
-func TestSleep(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping in short mode")
-	}
-	time.Sleep(time.Second)
+	processKiller(cmd.Process)
 }
 
 func TestKillStartProcess(t *testing.T) {
@@ -2405,6 +2433,9 @@ func TestRemoveAllRace(t *testing.T) {
 		// them open. The racing doesn't work out nicely
 		// like it does on Unix.
 		t.Skip("skipping on windows")
+	}
+	if runtime.GOOS == "dragonfly" {
+		testenv.SkipFlaky(t, 52301)
 	}
 
 	n := runtime.GOMAXPROCS(16)

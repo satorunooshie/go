@@ -18,7 +18,7 @@ type slice struct {
 	cap   int
 }
 
-// A notInHeapSlice is a slice backed by go:notinheap memory.
+// A notInHeapSlice is a slice backed by runtime/internal/sys.NotInHeap memory.
 type notInHeapSlice struct {
 	array *notInHeap
 	len   int
@@ -117,20 +117,34 @@ func makeslice64(et *_type, len64, cap64 int64) unsafe.Pointer {
 	return makeslice(et, len, cap)
 }
 
+// This is a wrapper over runtime/internal/math.MulUintptr,
+// so the compiler can recognize and treat it as an intrinsic.
+func mulUintptr(a, b uintptr) (uintptr, bool) {
+	return math.MulUintptr(a, b)
+}
+
+// Keep this code in sync with cmd/compile/internal/walk/builtin.go:walkUnsafeSlice
 func unsafeslice(et *_type, ptr unsafe.Pointer, len int) {
 	if len < 0 {
 		panicunsafeslicelen()
 	}
 
+	if et.size == 0 {
+		if ptr == nil && len > 0 {
+			panicunsafeslicenilptr()
+		}
+	}
+
 	mem, overflow := math.MulUintptr(et.size, uintptr(len))
 	if overflow || mem > -uintptr(ptr) {
 		if ptr == nil {
-			panic(errorString("unsafe.Slice: ptr is nil and len is not zero"))
+			panicunsafeslicenilptr()
 		}
 		panicunsafeslicelen()
 	}
 }
 
+// Keep this code in sync with cmd/compile/internal/walk/builtin.go:walkUnsafeSlice
 func unsafeslice64(et *_type, ptr unsafe.Pointer, len64 int64) {
 	len := int(len64)
 	if int64(len) != len64 {
@@ -151,6 +165,10 @@ func unsafeslicecheckptr(et *_type, ptr unsafe.Pointer, len64 int64) {
 
 func panicunsafeslicelen() {
 	panic(errorString("unsafe.Slice: len out of range"))
+}
+
+func panicunsafeslicenilptr() {
+	panic(errorString("unsafe.Slice: ptr is nil and len is not zero"))
 }
 
 // growslice handles slice growth during append.
@@ -176,7 +194,7 @@ func growslice(et *_type, old slice, cap int) slice {
 	}
 
 	if cap < old.cap {
-		panic(errorString("growslice: cap out of range"))
+		panic(errorString("growslice: len out of range"))
 	}
 
 	if et.size == 0 {
@@ -214,7 +232,7 @@ func growslice(et *_type, old slice, cap int) slice {
 	var lenmem, newlenmem, capmem uintptr
 	// Specialize for common values of et.size.
 	// For 1 we don't need any division/multiplication.
-	// For sys.PtrSize, compiler will optimize division/multiplication into a shift by a constant.
+	// For goarch.PtrSize, compiler will optimize division/multiplication into a shift by a constant.
 	// For powers of 2, use a variable shift.
 	switch {
 	case et.size == 1:
@@ -242,12 +260,14 @@ func growslice(et *_type, old slice, cap int) slice {
 		capmem = roundupsize(uintptr(newcap) << shift)
 		overflow = uintptr(newcap) > (maxAlloc >> shift)
 		newcap = int(capmem >> shift)
+		capmem = uintptr(newcap) << shift
 	default:
 		lenmem = uintptr(old.len) * et.size
 		newlenmem = uintptr(cap) * et.size
 		capmem, overflow = math.MulUintptr(et.size, uintptr(newcap))
 		capmem = roundupsize(capmem)
 		newcap = int(capmem / et.size)
+		capmem = uintptr(newcap) * et.size
 	}
 
 	// The check of overflow in addition to capmem > maxAlloc is needed
@@ -264,7 +284,7 @@ func growslice(et *_type, old slice, cap int) slice {
 	//   print(len(s), "\n")
 	// }
 	if overflow || capmem > maxAlloc {
-		panic(errorString("growslice: cap out of range"))
+		panic(errorString("growslice: len out of range"))
 	}
 
 	var p unsafe.Pointer

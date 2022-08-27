@@ -96,19 +96,7 @@ func (ctxt *Link) readImportCfg(file string) {
 }
 
 func pkgname(ctxt *Link, lib string) string {
-	name := path.Clean(lib)
-
-	// When using importcfg, we have the final package name.
-	if ctxt.PackageFile != nil {
-		return name
-	}
-
-	// runtime.a -> runtime, runtime.6 -> runtime
-	pkg := name
-	if len(pkg) >= 2 && pkg[len(pkg)-2] == '.' {
-		pkg = pkg[:len(pkg)-2]
-	}
-	return pkg
+	return path.Clean(lib)
 }
 
 func findlib(ctxt *Link, lib string) (string, bool) {
@@ -127,33 +115,24 @@ func findlib(ctxt *Link, lib string) (string, bool) {
 			return "", false
 		}
 	} else {
-		if filepath.IsAbs(name) {
-			pname = name
-		} else {
-			pkg := pkgname(ctxt, lib)
-			// Add .a if needed; the new -importcfg modes
-			// do not put .a into the package name anymore.
-			// This only matters when people try to mix
-			// compiles using -importcfg with links not using -importcfg,
-			// such as when running quick things like
-			// 'go tool compile x.go && go tool link x.o'
-			// by hand against a standard library built using -importcfg.
-			if !strings.HasSuffix(name, ".a") && !strings.HasSuffix(name, ".o") {
-				name += ".a"
-			}
-			// try dot, -L "libdir", and then goroot.
-			for _, dir := range ctxt.Libdir {
-				if ctxt.linkShared {
-					pname = filepath.Join(dir, pkg+".shlibname")
-					if _, err := os.Stat(pname); err == nil {
-						isshlib = true
-						break
-					}
-				}
-				pname = filepath.Join(dir, name)
+		pkg := pkgname(ctxt, lib)
+
+		// search -L "libdir" directories
+		for _, dir := range ctxt.Libdir {
+			if ctxt.linkShared {
+				pname = filepath.Join(dir, pkg+".shlibname")
 				if _, err := os.Stat(pname); err == nil {
+					isshlib = true
 					break
 				}
+			}
+			pname = filepath.Join(dir, name+".a")
+			if _, err := os.Stat(pname); err == nil {
+				break
+			}
+			pname = filepath.Join(dir, name+".o")
+			if _, err := os.Stat(pname); err == nil {
+				break
 			}
 		}
 		pname = filepath.Clean(pname)
@@ -253,7 +232,7 @@ func PrepareAddmoduledata(ctxt *Link) (*loader.SymbolBuilder, loader.Sym) {
 
 	// Create a new init func text symbol. Caller will populate this
 	// sym with arch-specific content.
-	ifs := ctxt.loader.LookupOrCreateSym("go.link.addmoduledata", 0)
+	ifs := ctxt.loader.LookupOrCreateSym("go:link.addmoduledata", 0)
 	initfunc := ctxt.loader.MakeSymbolUpdater(ifs)
 	ctxt.loader.SetAttrReachable(ifs, true)
 	ctxt.loader.SetAttrLocal(ifs, true)
@@ -266,7 +245,7 @@ func PrepareAddmoduledata(ctxt *Link) (*loader.SymbolBuilder, loader.Sym) {
 	ctxt.Textp = append(ctxt.Textp, initfunc.Sym())
 
 	// Create an init array entry
-	amdi := ctxt.loader.LookupOrCreateSym("go.link.addmoduledatainit", 0)
+	amdi := ctxt.loader.LookupOrCreateSym("go:link.addmoduledatainit", 0)
 	initarray_entry := ctxt.loader.MakeSymbolUpdater(amdi)
 	ctxt.loader.SetAttrReachable(amdi, true)
 	ctxt.loader.SetAttrLocal(amdi, true)

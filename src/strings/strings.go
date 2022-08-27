@@ -15,7 +15,7 @@ import (
 
 // explode splits s into a slice of UTF-8 strings,
 // one string per Unicode character up to a maximum of n (n < 0 means no limit).
-// Invalid UTF-8 sequences become correct encodings of U+FFFD.
+// Invalid UTF-8 bytes are sliced individually.
 func explode(s string, n int) []string {
 	l := utf8.RuneCountInString(s)
 	if n < 0 || n > l {
@@ -23,12 +23,9 @@ func explode(s string, n int) []string {
 	}
 	a := make([]string, n)
 	for i := 0; i < n-1; i++ {
-		ch, size := utf8.DecodeRuneInString(s)
+		_, size := utf8.DecodeRuneInString(s)
 		a[i] = s[:size]
 		s = s[size:]
-		if ch == utf8.RuneError {
-			a[i] = string(utf8.RuneError)
-		}
 	}
 	if n > 0 {
 		a[n-1] = s
@@ -244,6 +241,9 @@ func genSplit(s, sep string, sepSave, n int) []string {
 		n = Count(s, sep) + 1
 	}
 
+	if n > len(s)+1 {
+		n = len(s) + 1
+	}
 	a := make([]string, n)
 	n--
 	i := 0
@@ -264,21 +264,25 @@ func genSplit(s, sep string, sepSave, n int) []string {
 // the substrings between those separators.
 //
 // The count determines the number of substrings to return:
-//   n > 0: at most n substrings; the last substring will be the unsplit remainder.
-//   n == 0: the result is nil (zero substrings)
-//   n < 0: all substrings
+//
+//	n > 0: at most n substrings; the last substring will be the unsplit remainder.
+//	n == 0: the result is nil (zero substrings)
+//	n < 0: all substrings
 //
 // Edge cases for s and sep (for example, empty strings) are handled
 // as described in the documentation for Split.
+//
+// To split around the first instance of a separator, see Cut.
 func SplitN(s, sep string, n int) []string { return genSplit(s, sep, 0, n) }
 
 // SplitAfterN slices s into substrings after each instance of sep and
 // returns a slice of those substrings.
 //
 // The count determines the number of substrings to return:
-//   n > 0: at most n substrings; the last substring will be the unsplit remainder.
-//   n == 0: the result is nil (zero substrings)
-//   n < 0: all substrings
+//
+//	n > 0: at most n substrings; the last substring will be the unsplit remainder.
+//	n == 0: the result is nil (zero substrings)
+//	n < 0: all substrings
 //
 // Edge cases for s and sep (for example, empty strings) are handled
 // as described in the documentation for SplitAfter.
@@ -296,6 +300,8 @@ func SplitAfterN(s, sep string, n int) []string {
 // and sep are empty, Split returns an empty slice.
 //
 // It is equivalent to SplitN with a count of -1.
+//
+// To split around the first instance of a separator, see Cut.
 func Split(s, sep string) []string { return genSplit(s, sep, 0, -1) }
 
 // SplitAfter slices s into all substrings after each instance of sep and
@@ -562,14 +568,24 @@ func ToUpper(s string) string {
 		if !hasLower {
 			return s
 		}
-		var b Builder
+		var (
+			b   Builder
+			pos int
+		)
 		b.Grow(len(s))
 		for i := 0; i < len(s); i++ {
 			c := s[i]
 			if 'a' <= c && c <= 'z' {
 				c -= 'a' - 'A'
+				if pos < i {
+					b.WriteString(s[pos:i])
+				}
+				b.WriteByte(c)
+				pos = i + 1
 			}
-			b.WriteByte(c)
+		}
+		if pos < len(s) {
+			b.WriteString(s[pos:])
 		}
 		return b.String()
 	}
@@ -592,14 +608,24 @@ func ToLower(s string) string {
 		if !hasUpper {
 			return s
 		}
-		var b Builder
+		var (
+			b   Builder
+			pos int
+		)
 		b.Grow(len(s))
 		for i := 0; i < len(s); i++ {
 			c := s[i]
 			if 'A' <= c && c <= 'Z' {
 				c += 'a' - 'A'
+				if pos < i {
+					b.WriteString(s[pos:i])
+				}
+				b.WriteByte(c)
+				pos = i + 1
 			}
-			b.WriteByte(c)
+		}
+		if pos < len(s) {
+			b.WriteString(s[pos:])
 		}
 		return b.String()
 	}
@@ -953,7 +979,8 @@ func TrimSpace(s string) string {
 	for ; stop > start; stop-- {
 		c := s[stop-1]
 		if c >= utf8.RuneSelf {
-			return TrimFunc(s[start:stop], unicode.IsSpace)
+			// start has been already trimmed above, should trim end only
+			return TrimRightFunc(s[start:stop], unicode.IsSpace)
 		}
 		if asciiSpace[c] == 0 {
 			break
@@ -1034,7 +1061,7 @@ func ReplaceAll(s, old, new string) string {
 }
 
 // EqualFold reports whether s and t, interpreted as UTF-8 strings,
-// are equal under Unicode case-folding, which is a more general
+// are equal under simple Unicode case-folding, which is a more general
 // form of case-insensitivity.
 func EqualFold(s, t string) bool {
 	for s != "" && t != "" {
@@ -1179,4 +1206,26 @@ func Cut(s, sep string) (before, after string, found bool) {
 		return s[:i], s[i+len(sep):], true
 	}
 	return s, "", false
+}
+
+// CutPrefix returns s without the provided leading prefix string
+// and reports whether it found the prefix.
+// If s doesn't start with prefix, CutPrefix returns s, false.
+// If prefix is the empty string, CutPrefix returns s, true.
+func CutPrefix(s, prefix string) (after string, found bool) {
+	if !HasPrefix(s, prefix) {
+		return s, false
+	}
+	return s[len(prefix):], true
+}
+
+// CutSuffix returns s without the provided ending suffix string
+// and reports whether it found the suffix.
+// If s doesn't end with suffix, CutSuffix returns s, false.
+// If suffix is the empty string, CutSuffix returns s, true.
+func CutSuffix(s, suffix string) (before string, found bool) {
+	if !HasSuffix(s, suffix) {
+		return s, false
+	}
+	return s[:len(s)-len(suffix)], true
 }

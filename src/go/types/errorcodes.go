@@ -98,13 +98,10 @@ const (
 	// _InvalidDeclCycle occurs when a declaration cycle is not valid.
 	//
 	// Example:
-	//  import "unsafe"
-	//
-	//  type T struct {
-	//  	a [n]int
+	//  type S struct {
+	//  	S
 	//  }
 	//
-	//  var n = unsafe.Sizeof(T{})
 	_InvalidDeclCycle
 
 	// _InvalidTypeCycle occurs when a cycle in type definitions results in a
@@ -1264,6 +1261,8 @@ const (
 
 	// _InvalidUnsafeAdd occurs when unsafe.Add is called with a
 	// length argument that is not of integer type.
+	// It also occurs if it is used in a package compiled for a
+	// language version before go1.17.
 	//
 	// Example:
 	//  import "unsafe"
@@ -1275,6 +1274,8 @@ const (
 	// _InvalidUnsafeSlice occurs when unsafe.Slice is called with a
 	// pointer argument that is not of pointer type or a length argument
 	// that is not of integer type, negative, or out of bounds.
+	// It also occurs if it is used in a package compiled for a language
+	// version before go1.17.
 	//
 	// Example:
 	//  import "unsafe"
@@ -1342,11 +1343,6 @@ const (
 	//  func _() {
 	//  	f()
 	//  }
-	//
-	// Example:
-	//   type N[P, Q any] struct{}
-	//
-	//   var _ N[int]
 	_CannotInferTypeArgs
 
 	// _InvalidTypeArg occurs when a type argument does not satisfy its
@@ -1385,10 +1381,7 @@ const (
 
 	// _InvalidMethodTypeParams occurs when methods have type parameters.
 	//
-	// Example:
-	//  type T int
-	//
-	//  func (T) m[P any]() {}
+	// It cannot be encountered with an AST parsed using go/parser.
 	_InvalidMethodTypeParams
 
 	// _MisplacedTypeParam occurs when a type parameter is used in a place where
@@ -1400,4 +1393,31 @@ const (
 	// Example:
 	//  type T[P any] struct{ *P }
 	_MisplacedTypeParam
+
+	// _InvalidUnsafeSliceData occurs when unsafe.SliceData is called with
+	// an argument that is not of slice type. It also occurs if it is used
+	// in a package compiled for a language version before go1.20.
+	//
+	// Example:
+	//  import "unsafe"
+	//
+	//  var x int
+	//  var _ = unsafe.SliceData(x)
+	_InvalidUnsafeSliceData
+
+	// _InvalidUnsafeString occurs when unsafe.String is called with
+	// a length argument that is not of integer type, negative, or
+	// out of bounds. It also occurs if it is used in a package
+	// compiled for a language version before go1.20.
+	//
+	// Example:
+	//  import "unsafe"
+	//
+	//  var b [10]byte
+	//  var _ = unsafe.String(&b[0], -1)
+	_InvalidUnsafeString
+
+	// _InvalidUnsafeStringData occurs if it is used in a package
+	// compiled for a language version before go1.20.
+	_InvalidUnsafeStringData
 )

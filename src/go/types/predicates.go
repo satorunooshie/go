@@ -33,7 +33,7 @@ func isBasic(t Type, info BasicInfo) bool {
 // The allX predicates below report whether t is an X.
 // If t is a type parameter the result is true if isX is true
 // for all specified types of the type parameter's type set.
-// allX is an optimized version of isX(structuralType(t)) (which
+// allX is an optimized version of isX(coreType(t)) (which
 // is the same as underIs(t, isX)).
 
 func allBoolean(typ Type) bool         { return allBasic(typ, IsBoolean) }
@@ -47,7 +47,7 @@ func allNumericOrString(typ Type) bool { return allBasic(typ, IsNumeric|IsString
 // allBasic reports whether under(t) is a basic type with the specified info.
 // If t is a type parameter, the result is true if isBasic(t, info) is true
 // for all specific types of the type parameter's type set.
-// allBasic(t, info) is an optimized version of isBasic(structuralType(t), info).
+// allBasic(t, info) is an optimized version of isBasic(coreType(t), info).
 func allBasic(t Type, info BasicInfo) bool {
 	if tpar, _ := t.(*TypeParam); tpar != nil {
 		return tpar.is(func(t *term) bool { return t != nil && isBasic(t.typ, info) })
@@ -87,6 +87,11 @@ func IsInterface(t Type) bool {
 	return ok
 }
 
+// isNonTypeParamInterface reports whether t is an interface type but not a type parameter.
+func isNonTypeParamInterface(t Type) bool {
+	return !isTypeParam(t) && IsInterface(t)
+}
+
 // isTypeParam reports whether t is a type parameter.
 func isTypeParam(t Type) bool {
 	_, ok := t.(*TypeParam)
@@ -99,15 +104,17 @@ func isTypeParam(t Type) bool {
 func isGeneric(t Type) bool {
 	// A parameterized type is only generic if it doesn't have an instantiation already.
 	named, _ := t.(*Named)
-	return named != nil && named.obj != nil && named.targs == nil && named.TypeParams() != nil
+	return named != nil && named.obj != nil && named.inst == nil && named.TypeParams().Len() > 0
 }
 
 // Comparable reports whether values of type T are comparable.
 func Comparable(T Type) bool {
-	return comparable(T, nil)
+	return comparable(T, true, nil, nil)
 }
 
-func comparable(T Type, seen map[Type]bool) bool {
+// If dynamic is set, non-type parameter interfaces are always comparable.
+// If reportf != nil, it may be used to report why T is not comparable.
+func comparable(T Type, dynamic bool, seen map[Type]bool, reportf func(string, ...interface{})) bool {
 	if seen[T] {
 		return true
 	}
@@ -125,15 +132,34 @@ func comparable(T Type, seen map[Type]bool) bool {
 		return true
 	case *Struct:
 		for _, f := range t.fields {
-			if !comparable(f.typ, seen) {
+			if !comparable(f.typ, dynamic, seen, nil) {
+				if reportf != nil {
+					reportf("struct containing %s cannot be compared", f.typ)
+				}
 				return false
 			}
 		}
 		return true
 	case *Array:
-		return comparable(t.elem, seen)
+		if !comparable(t.elem, dynamic, seen, nil) {
+			if reportf != nil {
+				reportf("%s cannot be compared", t)
+			}
+			return false
+		}
+		return true
 	case *Interface:
-		return !isTypeParam(T) || t.IsComparable()
+		if dynamic && !isTypeParam(T) || t.typeSet().IsComparable(seen) {
+			return true
+		}
+		if reportf != nil {
+			if t.typeSet().IsEmpty() {
+				reportf("empty type set")
+			} else {
+				reportf("incomparable types in type set")
+			}
+		}
+		// fallthrough
 	}
 	return false
 }
@@ -269,18 +295,19 @@ func identical(x, y Type, cmpTags bool, p *ifacePair) bool {
 			}
 			smap := makeSubstMap(ytparams, targs)
 
-			var check *Checker // ok to call subst on a nil *Checker
+			var check *Checker   // ok to call subst on a nil *Checker
+			ctxt := NewContext() // need a non-nil Context for the substitution below
 
 			// Constraints must be pair-wise identical, after substitution.
 			for i, xtparam := range xtparams {
-				ybound := check.subst(token.NoPos, ytparams[i].bound, smap, nil)
+				ybound := check.subst(token.NoPos, ytparams[i].bound, smap, nil, ctxt)
 				if !identical(xtparam.bound, ybound, cmpTags, p) {
 					return false
 				}
 			}
 
-			yparams = check.subst(token.NoPos, y.params, smap, nil).(*Tuple)
-			yresults = check.subst(token.NoPos, y.results, smap, nil).(*Tuple)
+			yparams = check.subst(token.NoPos, y.params, smap, nil, ctxt).(*Tuple)
+			yresults = check.subst(token.NoPos, y.results, smap, nil, ctxt).(*Tuple)
 		}
 
 		return x.variadic == y.variadic &&
@@ -308,6 +335,9 @@ func identical(x, y Type, cmpTags bool, p *ifacePair) bool {
 		if y, ok := y.(*Interface); ok {
 			xset := x.typeSet()
 			yset := y.typeSet()
+			if xset.comparable != yset.comparable {
+				return false
+			}
 			if !xset.terms.equal(yset.terms) {
 				return false
 			}
@@ -384,7 +414,7 @@ func identical(x, y Type, cmpTags bool, p *ifacePair) bool {
 			if len(xargs) > 0 {
 				// Instances are identical if their original type and type arguments
 				// are identical.
-				if !Identical(x.orig, y.orig) {
+				if !Identical(x.Origin(), y.Origin()) {
 					return false
 				}
 				for i, xa := range xargs {

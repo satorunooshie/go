@@ -32,21 +32,20 @@ import (
 	"log"
 	"os"
 	"runtime"
-	"sort"
 )
 
-func hidePanic() {
-	if base.Debug.Panic == 0 && base.Errors() > 0 {
-		// If we've already complained about things
-		// in the program, don't bother complaining
-		// about a panic too; let the user clean up
-		// the code and try again.
-		if err := recover(); err != nil {
-			if err == "-h" {
-				panic(err)
-			}
-			base.ErrorExit()
+// handlePanic ensures that we print out an "internal compiler error" for any panic
+// or runtime exception during front-end compiler processing (unless there have
+// already been some compiler errors). It may also be invoked from the explicit panic in
+// hcrash(), in which case, we pass the panic on through.
+func handlePanic() {
+	if err := recover(); err != nil {
+		if err == "-h" {
+			// Force real panic now with -h option (hcrash) - the error
+			// information will have already been printed.
+			panic(err)
 		}
+		base.Fatalf("panic: %v", err)
 	}
 }
 
@@ -56,7 +55,7 @@ func hidePanic() {
 func Main(archInit func(*ssagen.ArchInfo)) {
 	base.Timer.Start("fe", "init")
 
-	defer hidePanic()
+	defer handlePanic()
 
 	archInit(&ssagen.Arch)
 
@@ -71,17 +70,14 @@ func Main(archInit func(*ssagen.ArchInfo)) {
 	// See bugs 31188 and 21945 (CLs 170638, 98075, 72371).
 	base.Ctxt.UseBASEntries = base.Ctxt.Headtype != objabi.Hdarwin
 
-	types.LocalPkg = types.NewPkg("", "")
-	types.LocalPkg.Prefix = "\"\""
+	base.DebugSSA = ssa.PhaseOption
+	base.ParseFlags()
 
-	// We won't know localpkg's height until after import
-	// processing. In the mean time, set to MaxPkgHeight to ensure
-	// height comparisons at least work until then.
-	types.LocalPkg.Height = types.MaxPkgHeight
+	types.LocalPkg = types.NewPkg(base.Ctxt.Pkgpath, "")
 
 	// pseudo-package, for scoping
 	types.BuiltinPkg = types.NewPkg("go.builtin", "") // TODO(gri) name this package go.builtin?
-	types.BuiltinPkg.Prefix = "go.builtin"            // not go%2ebuiltin
+	types.BuiltinPkg.Prefix = "go:builtin"
 
 	// pseudo-package, accessed by import "unsafe"
 	types.UnsafePkg = types.NewPkg("unsafe", "unsafe")
@@ -96,13 +92,10 @@ func Main(archInit func(*ssagen.ArchInfo)) {
 
 	// pseudo-packages used in symbol tables
 	ir.Pkgs.Itab = types.NewPkg("go.itab", "go.itab")
-	ir.Pkgs.Itab.Prefix = "go.itab" // not go%2eitab
+	ir.Pkgs.Itab.Prefix = "go:itab"
 
 	// pseudo-package used for methods with anonymous receivers
 	ir.Pkgs.Go = types.NewPkg("go", "")
-
-	base.DebugSSA = ssa.PhaseOption
-	base.ParseFlags()
 
 	// Record flags that affect the build result. (And don't
 	// record flags that don't, since that would cause spurious
@@ -141,7 +134,7 @@ func Main(archInit func(*ssagen.ArchInfo)) {
 
 	types.ParseLangFlag()
 
-	symABIs := ssagen.NewSymABIs(base.Ctxt.Pkgpath)
+	symABIs := ssagen.NewSymABIs()
 	if base.Flag.SymABIs != "" {
 		symABIs.ReadSymABIs(base.Flag.SymABIs)
 	}
@@ -190,6 +183,15 @@ func Main(archInit func(*ssagen.ArchInfo)) {
 	// Parse and typecheck input.
 	noder.LoadPackage(flag.Args())
 
+	// As a convenience to users (toolchain maintainers, in particular),
+	// when compiling a package named "main", we default the package
+	// path to "main" if the -p flag was not specified.
+	if base.Ctxt.Pkgpath == obj.UnlinkablePkg && types.LocalPkg.Name == "main" {
+		base.Ctxt.Pkgpath = "main"
+		types.LocalPkg.Path = "main"
+		types.LocalPkg.Prefix = "main"
+	}
+
 	dwarfgen.RecordPackageName()
 
 	// Prepare for backend processing. This must happen before pkginit,
@@ -204,17 +206,6 @@ func Main(archInit func(*ssagen.ArchInfo)) {
 	// carried out in, and even mundane optimizations like dead code
 	// removal can skew the results (e.g., #43444).
 	pkginit.MakeInit()
-
-	// Stability quirk: sort top-level declarations, so we're not
-	// sensitive to the order that functions are added. In particular,
-	// the order that noder+typecheck add function closures is very
-	// subtle, and not important to reproduce.
-	if base.Debug.UnifiedQuirks != 0 {
-		s := typecheck.Target.Decls
-		sort.SliceStable(s, func(i, j int) bool {
-			return s[i].Pos().Before(s[j].Pos())
-		})
-	}
 
 	// Eliminate some obviously dead code.
 	// Must happen after typechecking.
@@ -245,11 +236,6 @@ func Main(archInit func(*ssagen.ArchInfo)) {
 	base.Timer.Start("fe", "inlining")
 	if base.Flag.LowerL != 0 {
 		inline.InlinePackage()
-		// If any new fully-instantiated types were referenced during
-		// inlining, we need to create needed instantiations.
-		if len(typecheck.GetInstTypeList()) > 0 {
-			noder.BuildInstantiations(false)
-		}
 	}
 	noder.MakeWrappers(typecheck.Target) // must happen after inlining
 

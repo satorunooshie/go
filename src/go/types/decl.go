@@ -5,6 +5,7 @@
 package types
 
 import (
+	"bytes"
 	"fmt"
 	"go/ast"
 	"go/constant"
@@ -63,12 +64,6 @@ func (check *Checker) objDecl(obj Object, def *Named) {
 			check.indent--
 			check.trace(obj.Pos(), "=> %s (%s)", obj, obj.color())
 		}()
-	}
-
-	// Funcs with m.instRecv set have not yet be completed. Complete them now
-	// so that they have a type when objDecl exits.
-	if m, _ := obj.(*Func); m != nil && m.instRecv != nil {
-		check.completeMethod(nil, m)
 	}
 
 	// Checking the declaration of obj means inferring its type
@@ -277,7 +272,9 @@ loop:
 			check.trace(obj.Pos(), "## cycle contains: %d values, %d type definitions", nval, ndef)
 		}
 		defer func() {
-			if !valid {
+			if valid {
+				check.trace(obj.Pos(), "=> cycle is valid")
+			} else {
 				check.trace(obj.Pos(), "=> error: cycle is invalid")
 			}
 		}()
@@ -303,114 +300,46 @@ loop:
 	return false
 }
 
-type typeInfo uint
-
-// validType verifies that the given type does not "expand" infinitely
-// producing a cycle in the type graph. Cycles are detected by marking
-// defined types.
-// (Cycles involving alias types, as in "type A = [10]A" are detected
-// earlier, via the objDecl cycle detection mechanism.)
-func (check *Checker) validType(typ Type, path []Object) typeInfo {
-	const (
-		unknown typeInfo = iota
-		marked
-		valid
-		invalid
-	)
-
-	switch t := typ.(type) {
-	case *Array:
-		return check.validType(t.elem, path)
-
-	case *Struct:
-		for _, f := range t.fields {
-			if check.validType(f.typ, path) == invalid {
-				return invalid
-			}
-		}
-
-	case *Union:
-		for _, t := range t.terms {
-			if check.validType(t.typ, path) == invalid {
-				return invalid
-			}
-		}
-
-	case *Interface:
-		for _, etyp := range t.embeddeds {
-			if check.validType(etyp, path) == invalid {
-				return invalid
-			}
-		}
-
-	case *Named:
-		// If t is parameterized, we should be considering the instantiated (expanded)
-		// form of t, but in general we can't with this algorithm: if t is an invalid
-		// type it may be so because it infinitely expands through a type parameter.
-		// Instantiating such a type would lead to an infinite sequence of instantiations.
-		// In general, we need "type flow analysis" to recognize those cases.
-		// Example: type A[T any] struct{ x A[*T] } (issue #48951)
-		// In this algorithm we always only consider the original, uninstantiated type.
-		// This won't recognize some invalid cases with parameterized types, but it
-		// will terminate.
-		t = t.orig
-
-		// don't touch the type if it is from a different package or the Universe scope
-		// (doing so would lead to a race condition - was issue #35049)
-		if t.obj.pkg != check.pkg {
-			return valid
-		}
-
-		// don't report a 2nd error if we already know the type is invalid
-		// (e.g., if a cycle was detected earlier, via under).
-		if t.underlying == Typ[Invalid] {
-			t.info = invalid
-			return invalid
-		}
-
-		switch t.info {
-		case unknown:
-			t.info = marked
-			t.info = check.validType(t.fromRHS, append(path, t.obj)) // only types of current package added to path
-		case marked:
-			// cycle detected
-			for i, tn := range path {
-				if t.obj.pkg != check.pkg {
-					panic("type cycle via package-external type")
-				}
-				if tn == t.obj {
-					check.cycleError(path[i:])
-					t.info = invalid
-					t.underlying = Typ[Invalid]
-					return invalid
-				}
-			}
-			panic("cycle start not found")
-		}
-		return t.info
-	}
-
-	return valid
-}
-
 // cycleError reports a declaration cycle starting with
 // the object in cycle that is "first" in the source.
 func (check *Checker) cycleError(cycle []Object) {
+	// name returns the (possibly qualified) object name.
+	// This is needed because with generic types, cycles
+	// may refer to imported types. See issue #50788.
+	// TODO(gri) Thus functionality is used elsewhere. Factor it out.
+	name := func(obj Object) string {
+		var buf bytes.Buffer
+		writePackage(&buf, obj.Pkg(), check.qualifier)
+		buf.WriteString(obj.Name())
+		return buf.String()
+	}
+
 	// TODO(gri) Should we start with the last (rather than the first) object in the cycle
 	//           since that is the earliest point in the source where we start seeing the
 	//           cycle? That would be more consistent with other error messages.
 	i := firstInSrc(cycle)
 	obj := cycle[i]
-	check.errorf(obj, _InvalidDeclCycle, "illegal cycle in declaration of %s", obj.Name())
+	objName := name(obj)
+	// If obj is a type alias, mark it as valid (not broken) in order to avoid follow-on errors.
+	tname, _ := obj.(*TypeName)
+	if tname != nil && tname.IsAlias() {
+		check.validAlias(tname, Typ[Invalid])
+	}
+	if tname != nil && compilerErrorMessages {
+		check.errorf(obj, _InvalidDeclCycle, "invalid recursive type %s", objName)
+	} else {
+		check.errorf(obj, _InvalidDeclCycle, "illegal cycle in declaration of %s", objName)
+	}
 	for range cycle {
-		check.errorf(obj, _InvalidDeclCycle, "\t%s refers to", obj.Name()) // secondary error, \t indented
+		check.errorf(obj, _InvalidDeclCycle, "\t%s refers to", objName) // secondary error, \t indented
 		i++
 		if i >= len(cycle) {
 			i = 0
 		}
 		obj = cycle[i]
+		objName = name(obj)
 	}
-	check.errorf(obj, _InvalidDeclCycle, "\t%s", obj.Name())
+	check.errorf(obj, _InvalidDeclCycle, "\t%s", objName)
 }
 
 // firstInSrc reports the index of the object with the "smallest"
@@ -620,7 +549,9 @@ func (check *Checker) typeDecl(obj *TypeName, tdecl *ast.TypeSpec, def *Named) {
 
 	var rhs Type
 	check.later(func() {
-		check.validType(obj.typ, nil)
+		if t, _ := obj.typ.(*Named); t != nil { // type may be invalid
+			check.validType(t)
+		}
 		// If typ is local, an error was already reported where typ is specified/defined.
 		if check.isImportedConstraint(rhs) && !check.allowVersion(check.pkg, 1, 18) {
 			check.errorf(tdecl.Type, _UnsupportedFeature, "using type constraint %s requires go1.18 or later", rhs)
@@ -641,14 +572,14 @@ func (check *Checker) typeDecl(obj *TypeName, tdecl *ast.TypeSpec, def *Named) {
 			check.errorf(atPos(tdecl.Assign), _BadDecl, "type aliases requires go1.9 or later")
 		}
 
-		obj.typ = Typ[Invalid]
-		rhs = check.varType(tdecl.Type)
-		obj.typ = rhs
+		check.brokenAlias(obj)
+		rhs = check.typ(tdecl.Type)
+		check.validAlias(obj, rhs)
 		return
 	}
 
 	// type definition or generic type declaration
-	named := check.newNamed(obj, nil, nil, nil, nil)
+	named := check.newNamed(obj, nil, nil)
 	def.setUnderlying(named)
 
 	if tdecl.TypeParams != nil {
@@ -662,8 +593,8 @@ func (check *Checker) typeDecl(obj *TypeName, tdecl *ast.TypeSpec, def *Named) {
 	assert(rhs != nil)
 	named.fromRHS = rhs
 
-	// If the underlying was not set while type-checking the right-hand side, it
-	// is invalid and an error should have been reported elsewhere.
+	// If the underlying type was not set while type-checking the right-hand
+	// side, it is invalid and an error should have been reported elsewhere.
 	if named.underlying == nil {
 		named.underlying = Typ[Invalid]
 	}
@@ -707,35 +638,28 @@ func (check *Checker) collectTypeParams(dst **TypeParamList, list *ast.FieldList
 	}()
 
 	index := 0
-	var bounds []Type
-	var posns []positioner // bound positions
 	for _, f := range list.List {
-		// TODO(rfindley) we should be able to rely on f.Type != nil at this point
+		var bound Type
+		// NOTE: we may be able to assert that f.Type != nil here, but this is not
+		// an invariant of the AST, so we are cautious.
 		if f.Type != nil {
-			bound := check.bound(f.Type)
-			bounds = append(bounds, bound)
-			posns = append(posns, f.Type)
-			for i := range f.Names {
-				tparams[index+i].bound = bound
-			}
-		}
-		index += len(f.Names)
-	}
-
-	check.later(func() {
-		for i, bound := range bounds {
+			bound = check.bound(f.Type)
 			if isTypeParam(bound) {
 				// We may be able to allow this since it is now well-defined what
 				// the underlying type and thus type set of a type parameter is.
 				// But we may need some additional form of cycle detection within
 				// type parameter lists.
-				check.error(posns[i], _MisplacedTypeParam, "cannot use a type parameter as constraint")
+				check.error(f.Type, _MisplacedTypeParam, "cannot use a type parameter as constraint")
+				bound = Typ[Invalid]
 			}
+		} else {
+			bound = Typ[Invalid]
 		}
-		for _, tpar := range tparams {
-			tpar.iface() // compute type set
+		for i := range f.Names {
+			tparams[index+i].bound = bound
 		}
-	})
+		index += len(f.Names)
+	}
 }
 
 func (check *Checker) bound(x ast.Expr) Type {
@@ -801,19 +725,19 @@ func (check *Checker) collectMethods(obj *TypeName) {
 	// and field names must be distinct."
 	base, _ := obj.typ.(*Named) // shouldn't fail but be conservative
 	if base != nil {
-		u := base.under()
-		if t, _ := u.(*Struct); t != nil {
-			for _, fld := range t.fields {
-				if fld.name != "_" {
-					assert(mset.insert(fld) == nil)
-				}
-			}
-		}
+		assert(base.TypeArgs().Len() == 0) // collectMethods should not be called on an instantiated type
+
+		// See issue #52529: we must delay the expansion of underlying here, as
+		// base may not be fully set-up.
+		check.later(func() {
+			check.checkFieldUniqueness(base)
+		}).describef(obj, "verifying field uniqueness for %v", base)
 
 		// Checker.Files may be called multiple times; additional package files
 		// may add methods to already type-checked types. Add pre-existing methods
 		// so that we can detect redeclarations.
-		for _, m := range base.methods {
+		for i := 0; i < base.NumMethods(); i++ {
+			m := base.Method(i)
 			assert(m.name != "_")
 			assert(mset.insert(m) == nil)
 		}
@@ -825,21 +749,41 @@ func (check *Checker) collectMethods(obj *TypeName) {
 		// to it must be unique."
 		assert(m.name != "_")
 		if alt := mset.insert(m); alt != nil {
-			switch alt.(type) {
-			case *Var:
-				check.errorf(m, _DuplicateFieldAndMethod, "field and method with the same name %s", m.name)
-			case *Func:
-				check.errorf(m, _DuplicateMethod, "method %s already declared for %s", m.name, obj)
-			default:
-				unreachable()
-			}
+			check.errorf(m, _DuplicateMethod, "method %s already declared for %s", m.name, obj)
 			check.reportAltDecl(alt)
 			continue
 		}
 
 		if base != nil {
-			base.resolve(nil) // TODO(mdempsky): Probably unnecessary.
-			base.methods = append(base.methods, m)
+			base.AddMethod(m)
+		}
+	}
+}
+
+func (check *Checker) checkFieldUniqueness(base *Named) {
+	if t, _ := base.under().(*Struct); t != nil {
+		var mset objset
+		for i := 0; i < base.NumMethods(); i++ {
+			m := base.Method(i)
+			assert(m.name != "_")
+			assert(mset.insert(m) == nil)
+		}
+
+		// Check that any non-blank field names of base are distinct from its
+		// method names.
+		for _, fld := range t.fields {
+			if fld.name != "_" {
+				if alt := mset.insert(fld); alt != nil {
+					// Struct fields should already be unique, so we should only
+					// encounter an alternate via collision with a method name.
+					_ = alt.(*Func)
+
+					// For historical consistency, we report the primary error on the
+					// method, and the alt decl on the field.
+					check.errorf(alt, _DuplicateFieldAndMethod, "field and method with the same name %s", fld.name)
+					check.reportAltDecl(fld)
+				}
+			}
 		}
 	}
 }
@@ -874,7 +818,7 @@ func (check *Checker) funcDecl(obj *Func, decl *declInfo) {
 	if !check.conf.IgnoreFuncBodies && fdecl.Body != nil {
 		check.later(func() {
 			check.funcBody(decl, obj.name, sig, fdecl.Body, nil)
-		})
+		}).describef(obj, "func %s", obj.name)
 	}
 }
 

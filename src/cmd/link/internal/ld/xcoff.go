@@ -598,16 +598,16 @@ func xcoffUpdateOuterSize(ctxt *Link, size int64, stype sym.SymKind) {
 		if !ctxt.DynlinkingGo() {
 			// runtime.types size must be removed, as it's a real symbol.
 			tsize := ldr.SymSize(ldr.Lookup("runtime.types", 0))
-			outerSymSize["type.*"] = size - tsize
+			outerSymSize["type:*"] = size - tsize
 		}
 	case sym.SGOSTRING:
-		outerSymSize["go.string.*"] = size
+		outerSymSize["go:string.*"] = size
 	case sym.SGOFUNC:
 		if !ctxt.DynlinkingGo() {
-			outerSymSize["go.func.*"] = size
+			outerSymSize["go:func.*"] = size
 		}
 	case sym.SGOFUNCRELRO:
-		outerSymSize["go.funcrel.*"] = size
+		outerSymSize["go:funcrel.*"] = size
 	case sym.SGCBITS:
 		outerSymSize["runtime.gcbits.*"] = size
 	case sym.SPCLNTAB:
@@ -755,8 +755,8 @@ func (f *xcoffFile) writeSymbolNewFile(ctxt *Link, name string, firstEntry uint6
 }
 
 // Update values for the previous package.
-//  - Svalue of the C_FILE symbol: if it is the last one, this Svalue must be -1
-//  - Xsclen of the csect symbol.
+//   - Svalue of the C_FILE symbol: if it is the last one, this Svalue must be -1
+//   - Xsclen of the csect symbol.
 func (f *xcoffFile) updatePreviousFile(ctxt *Link, last bool) {
 	// first file
 	if currSymSrcFile.file == nil {
@@ -893,7 +893,7 @@ func putaixsym(ctxt *Link, x loader.Sym, t SymbolType) {
 			syms = xfile.writeSymbolFunc(ctxt, x)
 		} else {
 			// Only runtime.text and runtime.etext come through this way
-			if name != "runtime.text" && name != "runtime.etext" && name != "go.buildid" {
+			if name != "runtime.text" && name != "runtime.etext" && name != "go:buildid" {
 				Exitf("putaixsym: unknown text symbol %s", name)
 			}
 			s := &XcoffSymEnt64{
@@ -1117,7 +1117,7 @@ func (f *xcoffFile) asmaixsym(ctxt *Link) {
 				putaixsym(ctxt, s, TLSSym)
 			}
 
-		case st == sym.SBSS, st == sym.SNOPTRBSS, st == sym.SLIBFUZZER_EXTRA_COUNTER:
+		case st == sym.SBSS, st == sym.SNOPTRBSS, st == sym.SLIBFUZZER_8BIT_COUNTER:
 			if ldr.AttrReachable(s) {
 				data := ldr.Data(s)
 				if len(data) > 0 {

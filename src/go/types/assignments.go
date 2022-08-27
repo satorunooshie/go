@@ -9,6 +9,7 @@ package types
 import (
 	"fmt"
 	"go/ast"
+	"go/token"
 	"strings"
 )
 
@@ -38,7 +39,7 @@ func (check *Checker) assignment(x *operand, T Type, context string) {
 		// bool, rune, int, float64, complex128 or string respectively, depending
 		// on whether the value is a boolean, rune, integer, floating-point,
 		// complex, or string constant."
-		if T == nil || IsInterface(T) && !isTypeParam(T) {
+		if T == nil || isNonTypeParamInterface(T) {
 			if T == nil && x.typ == Typ[UntypedNil] {
 				check.errorf(x, _UntypedNil, "use of untyped nil in %s", context)
 				x.mode = invalid
@@ -290,15 +291,14 @@ func (check *Checker) typesSummary(list []Type, variadic bool) string {
 	return "(" + strings.Join(res, ", ") + ")"
 }
 
-func (check *Checker) assignError(rhs []ast.Expr, nvars, nvals int) {
-	measure := func(x int, unit string) string {
-		s := fmt.Sprintf("%d %s", x, unit)
-		if x != 1 {
-			s += "s"
-		}
-		return s
+func measure(x int, unit string) string {
+	if x != 1 {
+		unit += "s"
 	}
+	return fmt.Sprintf("%d %s", x, unit)
+}
 
+func (check *Checker) assignError(rhs []ast.Expr, nvars, nvals int) {
 	vars := measure(nvars, "variable")
 	vals := measure(nvals, "value")
 	rhs0 := rhs[0]
@@ -340,11 +340,10 @@ func (check *Checker) initVars(lhs []*Var, origRHS []ast.Expr, returnStmt ast.St
 			} else if len(rhs) > 0 {
 				at = rhs[len(rhs)-1].expr // report at last value
 			}
-			check.errorf(at, _WrongResultCount, "%s return values\n\thave %s\n\twant %s",
-				qualifier,
-				check.typesSummary(operandTypes(rhs), false),
-				check.typesSummary(varTypes(lhs), false),
-			)
+			err := newErrorf(at, _WrongResultCount, "%s return values", qualifier)
+			err.errorf(token.NoPos, "have %s", check.typesSummary(operandTypes(rhs), false))
+			err.errorf(token.NoPos, "want %s", check.typesSummary(varTypes(lhs), false))
+			check.report(err)
 			return
 		}
 		if compilerErrorMessages {

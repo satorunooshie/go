@@ -6,7 +6,6 @@ package types
 
 import (
 	"bytes"
-	"crypto/md5"
 	"encoding/binary"
 	"fmt"
 	"go/constant"
@@ -15,6 +14,7 @@ import (
 	"sync"
 
 	"cmd/compile/internal/base"
+	"cmd/internal/notsha256"
 )
 
 // BuiltinPkg is a fake package that declares the universe block.
@@ -82,7 +82,6 @@ const (
 //	%v	Go syntax: Name for symbols in the local package, PkgName.Name for imported symbols.
 //	%+v	Debug syntax: always include PkgName. prefix even for local names.
 //	%S	Short syntax: Name only, no matter what.
-//
 func (s *Sym) Format(f fmt.State, verb rune) {
 	mode := fmtGo
 	switch verb {
@@ -144,11 +143,6 @@ func symfmt(b *bytes.Buffer, s *Sym, verb rune, mode fmtMode) {
 	if q := pkgqual(s.Pkg, verb, mode); q != "" {
 		b.WriteString(q)
 		b.WriteByte('.')
-		if mode == fmtTypeIDName {
-			// If name is a generic instantiation, it might have local package placeholders
-			// in it. Replace those placeholders with the package name. See issue 49547.
-			name = strings.Replace(name, LocalPkg.Prefix, q, -1)
-		}
 	}
 	b.WriteString(name)
 }
@@ -157,6 +151,9 @@ func symfmt(b *bytes.Buffer, s *Sym, verb rune, mode fmtMode) {
 // symbols from the given package in the given mode.
 // If it returns the empty string, no qualification is needed.
 func pkgqual(pkg *Pkg, verb rune, mode fmtMode) string {
+	if pkg == nil {
+		return ""
+	}
 	if verb != 'S' {
 		switch mode {
 		case fmtGo: // This is for the user
@@ -226,7 +223,6 @@ var fmtBufferPool = sync.Pool{
 //	%L	Go syntax for underlying type if t is named
 //	%S	short Go syntax: drop leading "func" in function type
 //	%-S	special case for method receiver symbol
-//
 func (t *Type) Format(s fmt.State, verb rune) {
 	mode := fmtGo
 	switch verb {
@@ -248,24 +244,13 @@ func (t *Type) String() string {
 	return tconv(t, 0, fmtGo)
 }
 
-// LinkString returns an unexpanded string description of t, suitable
-// for use in link symbols. "Unexpanded" here means that the
-// description uses `"".` to qualify identifiers from the current
-// package, and "expansion" refers to the renaming step performed by
-// the linker to replace these qualifiers with proper `path/to/pkg.`
-// qualifiers.
+// LinkString returns a string description of t, suitable for use in
+// link symbols.
 //
-// After expansion, the description corresponds to type identity. That
-// is, for any pair of types t1 and t2, Identical(t1, t2) and
-// expand(t1.LinkString()) == expand(t2.LinkString()) report the same
-// value.
-//
-// Within a single compilation unit, LinkString always returns the
-// same unexpanded description for identical types. Thus it's safe to
-// use as a map key to implement a type-identity-keyed map. However,
-// make sure all LinkString calls used for this purpose happen within
-// the same compile process; the string keys are not stable across
-// multiple processes.
+// The description corresponds to type identity. That is, for any pair
+// of types t1 and t2, Identical(t1, t2) == (t1.LinkString() ==
+// t2.LinkString()) is true. Thus it's safe to use as a map key to
+// implement a type-identity-keyed map.
 func (t *Type) LinkString() string {
 	return tconv(t, 0, fmtTypeID)
 }
@@ -355,13 +340,9 @@ func tconv2(b *bytes.Buffer, t *Type, verb rune, mode fmtMode, visited map[*Type
 		// non-fmtTypeID modes.
 		sym := t.Sym()
 		if mode != fmtTypeID {
-			i := len(sym.Name)
-			for i > 0 && sym.Name[i-1] >= '0' && sym.Name[i-1] <= '9' {
-				i--
-			}
-			const dot = "·"
-			if i >= len(dot) && sym.Name[i-len(dot):i] == dot {
-				sym = &Sym{Pkg: sym.Pkg, Name: sym.Name[:i-len(dot)]}
+			base, _ := SplitVargenSuffix(sym.Name)
+			if len(base) < len(sym.Name) {
+				sym = &Sym{Pkg: sym.Pkg, Name: base}
 			}
 		}
 		sconv2(b, sym, verb, mode)
@@ -631,6 +612,7 @@ func fldconv(b *bytes.Buffer, f *Field, verb rune, mode fmtMode, visited map[*Ty
 	}
 
 	var name string
+	nameSep := " "
 	if verb != 'S' {
 		s := f.Sym
 
@@ -639,7 +621,47 @@ func fldconv(b *bytes.Buffer, f *Field, verb rune, mode fmtMode, visited map[*Ty
 			s = OrigSym(s)
 		}
 
-		if s != nil && f.Embedded == 0 {
+		// Using type aliases and embedded fields, it's possible to
+		// construct types that can't be directly represented as a
+		// type literal. For example, given "type Int = int" (#50190),
+		// it would be incorrect to format "struct{ Int }" as either
+		// "struct{ int }" or "struct{ Int int }", because those each
+		// represent other, distinct types.
+		//
+		// So for the purpose of LinkString (i.e., fmtTypeID), we use
+		// the non-standard syntax "struct{ Int = int }" to represent
+		// embedded fields that have been renamed through the use of
+		// type aliases.
+		if f.Embedded != 0 {
+			if mode == fmtTypeID {
+				nameSep = " = "
+
+				// Compute tsym, the symbol that would normally be used as
+				// the field name when embedding f.Type.
+				// TODO(mdempsky): Check for other occurrences of this logic
+				// and deduplicate.
+				typ := f.Type
+				if typ.IsPtr() {
+					base.Assertf(typ.Sym() == nil, "embedded pointer type has name: %L", typ)
+					typ = typ.Elem()
+				}
+				tsym := typ.Sym()
+
+				// If the field name matches the embedded type's name, then
+				// suppress printing of the field name. For example, format
+				// "struct{ T }" as simply that instead of "struct{ T = T }".
+				if tsym != nil && (s == tsym || IsExported(tsym.Name) && s.Name == tsym.Name) {
+					s = nil
+				}
+			} else {
+				// Suppress the field name for embedded fields for
+				// non-LinkString formats, to match historical behavior.
+				// TODO(mdempsky): Re-evaluate this.
+				s = nil
+			}
+		}
+
+		if s != nil {
 			if funarg != FunargNone {
 				name = fmt.Sprint(f.Nname)
 			} else if verb == 'L' {
@@ -658,7 +680,7 @@ func fldconv(b *bytes.Buffer, f *Field, verb rune, mode fmtMode, visited map[*Ty
 
 	if name != "" {
 		b.WriteString(name)
-		b.WriteString(" ")
+		b.WriteString(nameSep)
 	}
 
 	if f.IsDDD() {
@@ -676,6 +698,21 @@ func fldconv(b *bytes.Buffer, f *Field, verb rune, mode fmtMode, visited map[*Ty
 		b.WriteString(" ")
 		b.WriteString(strconv.Quote(f.Note))
 	}
+}
+
+// SplitVargenSuffix returns name split into a base string and a ·N
+// suffix, if any.
+func SplitVargenSuffix(name string) (base, suffix string) {
+	i := len(name)
+	for i > 0 && name[i-1] >= '0' && name[i-1] <= '9' {
+		i--
+	}
+	const dot = "·"
+	if i >= len(dot) && name[i-len(dot):i] == dot {
+		i -= len(dot)
+		return name[:i], name[i:]
+	}
+	return name, ""
 }
 
 // Val
@@ -715,9 +752,9 @@ func FmtConst(v constant.Value, sharp bool) string {
 
 // TypeHash computes a hash value for type t to use in type switch statements.
 func TypeHash(t *Type) uint32 {
-	p := t.NameString()
+	p := t.LinkString()
 
-	// Using MD5 is overkill, but reduces accidental collisions.
-	h := md5.Sum([]byte(p))
+	// Using SHA256 is overkill, but reduces accidental collisions.
+	h := notsha256.Sum256([]byte(p))
 	return binary.LittleEndian.Uint32(h[:4])
 }

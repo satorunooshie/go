@@ -337,6 +337,17 @@ func (b *B) launch() {
 	b.result = BenchmarkResult{b.N, b.duration, b.bytes, b.netAllocs, b.netBytes, b.extra}
 }
 
+// Elapsed returns the measured elapsed time of the benchmark.
+// The duration reported by Elapsed matches the one measured by
+// StartTimer, StopTimer, and ResetTimer.
+func (b *B) Elapsed() time.Duration {
+	d := b.duration
+	if b.timerOn {
+		d += time.Since(b.start)
+	}
+	return d
+}
+
 // ReportMetric adds "n unit" to the reported benchmark results.
 // If the metric is per-iteration, the caller should divide by b.N,
 // and by convention units should end in "/op".
@@ -615,6 +626,11 @@ func (ctx *benchContext) processBench(b *B) {
 	}
 }
 
+// If hideStdoutForTesting is true, Run does not print the benchName.
+// This avoids a spurious print during 'go test' on package testing itself,
+// which invokes b.Run in its own tests (see sub_test.go).
+var hideStdoutForTesting = false
+
 // Run benchmarks f as a subbenchmark with the given name. It reports
 // whether there were any failures.
 //
@@ -670,7 +686,9 @@ func (b *B) Run(name string, f func(b *B)) bool {
 			}
 		})
 
-		fmt.Println(benchName)
+		if !hideStdoutForTesting {
+			fmt.Println(benchName)
+		}
 	}
 
 	if sub.run1() {

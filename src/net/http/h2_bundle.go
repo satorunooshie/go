@@ -30,7 +30,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"math"
 	mathrand "math/rand"
@@ -860,7 +859,6 @@ func (p *http2clientConnPool) getStartDialLocked(ctx context.Context, addr strin
 func (c *http2dialCall) dial(ctx context.Context, addr string) {
 	const singleUse = false // shared conn
 	c.res, c.err = c.p.t.dialClientConn(ctx, addr, singleUse)
-	close(c.done)
 
 	c.p.mu.Lock()
 	delete(c.p.dialing, addr)
@@ -868,6 +866,8 @@ func (c *http2dialCall) dial(ctx context.Context, addr string) {
 		c.p.addConnLocked(addr, c.res)
 	}
 	c.p.mu.Unlock()
+
+	close(c.done)
 }
 
 // addConnIfNeeded makes a NewClientConn out of c if a connection for key doesn't
@@ -1294,7 +1294,7 @@ func (e http2headerFieldNameError) Error() string {
 type http2headerFieldValueError string
 
 func (e http2headerFieldValueError) Error() string {
-	return fmt.Sprintf("invalid header field value %q", string(e))
+	return fmt.Sprintf("invalid header field value for %q", string(e))
 }
 
 var (
@@ -1352,7 +1352,7 @@ const http2frameHeaderLen = 9
 var http2padZeros = make([]byte, 255) // zeros for padding
 
 // A FrameType is a registered frame type as defined in
-// http://http2.github.io/http2-spec/#rfc.section.11.2
+// https://httpwg.org/specs/rfc7540.html#rfc.section.11.2
 type http2FrameType uint8
 
 const (
@@ -1475,7 +1475,7 @@ func http2typeFrameParser(t http2FrameType) http2frameParser {
 
 // A FrameHeader is the 9 byte header of all HTTP/2 frames.
 //
-// See http://http2.github.io/http2-spec/#FrameHeader
+// See https://httpwg.org/specs/rfc7540.html#FrameHeader
 type http2FrameHeader struct {
 	valid bool // caller can access []byte fields in the Frame
 
@@ -1907,7 +1907,7 @@ func (fr *http2Framer) checkFrameOrder(f http2Frame) error {
 
 // A DataFrame conveys arbitrary, variable-length sequences of octets
 // associated with a stream.
-// See http://http2.github.io/http2-spec/#rfc.section.6.1
+// See https://httpwg.org/specs/rfc7540.html#rfc.section.6.1
 type http2DataFrame struct {
 	http2FrameHeader
 	data []byte
@@ -2030,7 +2030,7 @@ func (f *http2Framer) WriteDataPadded(streamID uint32, endStream bool, data, pad
 // endpoints communicate, such as preferences and constraints on peer
 // behavior.
 //
-// See http://http2.github.io/http2-spec/#SETTINGS
+// See https://httpwg.org/specs/rfc7540.html#SETTINGS
 type http2SettingsFrame struct {
 	http2FrameHeader
 	p []byte
@@ -2169,7 +2169,7 @@ func (f *http2Framer) WriteSettingsAck() error {
 // A PingFrame is a mechanism for measuring a minimal round trip time
 // from the sender, as well as determining whether an idle connection
 // is still functional.
-// See http://http2.github.io/http2-spec/#rfc.section.6.7
+// See https://httpwg.org/specs/rfc7540.html#rfc.section.6.7
 type http2PingFrame struct {
 	http2FrameHeader
 	Data [8]byte
@@ -2202,7 +2202,7 @@ func (f *http2Framer) WritePing(ack bool, data [8]byte) error {
 }
 
 // A GoAwayFrame informs the remote peer to stop creating streams on this connection.
-// See http://http2.github.io/http2-spec/#rfc.section.6.8
+// See https://httpwg.org/specs/rfc7540.html#rfc.section.6.8
 type http2GoAwayFrame struct {
 	http2FrameHeader
 	LastStreamID uint32
@@ -2266,7 +2266,7 @@ func http2parseUnknownFrame(_ *http2frameCache, fh http2FrameHeader, countError 
 }
 
 // A WindowUpdateFrame is used to implement flow control.
-// See http://http2.github.io/http2-spec/#rfc.section.6.9
+// See https://httpwg.org/specs/rfc7540.html#rfc.section.6.9
 type http2WindowUpdateFrame struct {
 	http2FrameHeader
 	Increment uint32 // never read with high bit set
@@ -2455,7 +2455,7 @@ func (f *http2Framer) WriteHeaders(p http2HeadersFrameParam) error {
 }
 
 // A PriorityFrame specifies the sender-advised priority of a stream.
-// See http://http2.github.io/http2-spec/#rfc.section.6.3
+// See https://httpwg.org/specs/rfc7540.html#rfc.section.6.3
 type http2PriorityFrame struct {
 	http2FrameHeader
 	http2PriorityParam
@@ -2525,7 +2525,7 @@ func (f *http2Framer) WritePriority(streamID uint32, p http2PriorityParam) error
 }
 
 // A RSTStreamFrame allows for abnormal termination of a stream.
-// See http://http2.github.io/http2-spec/#rfc.section.6.4
+// See https://httpwg.org/specs/rfc7540.html#rfc.section.6.4
 type http2RSTStreamFrame struct {
 	http2FrameHeader
 	ErrCode http2ErrCode
@@ -2557,7 +2557,7 @@ func (f *http2Framer) WriteRSTStream(streamID uint32, code http2ErrCode) error {
 }
 
 // A ContinuationFrame is used to continue a sequence of header block fragments.
-// See http://http2.github.io/http2-spec/#rfc.section.6.10
+// See https://httpwg.org/specs/rfc7540.html#rfc.section.6.10
 type http2ContinuationFrame struct {
 	http2FrameHeader
 	headerFragBuf []byte
@@ -2598,7 +2598,7 @@ func (f *http2Framer) WriteContinuation(streamID uint32, endHeaders bool, header
 }
 
 // A PushPromiseFrame is used to initiate a server stream.
-// See http://http2.github.io/http2-spec/#rfc.section.6.6
+// See https://httpwg.org/specs/rfc7540.html#rfc.section.6.6
 type http2PushPromiseFrame struct {
 	http2FrameHeader
 	PromiseID     uint32
@@ -2864,7 +2864,8 @@ func (fr *http2Framer) readMetaFrame(hf *http2HeadersFrame) (*http2MetaHeadersFr
 			fr.debugReadLoggerf("http2: decoded hpack field %+v", hf)
 		}
 		if !httpguts.ValidHeaderFieldValue(hf.Value) {
-			invalid = http2headerFieldValueError(hf.Value)
+			// Don't include the value in the error, because it may be sensitive.
+			invalid = http2headerFieldValueError(hf.Name)
 		}
 		isPseudo := strings.HasPrefix(hf.Name, ":")
 		if isPseudo {
@@ -3008,6 +3009,10 @@ func (t *http2Transport) dialTLSWithContext(ctx context.Context, network, addr s
 	}
 	tlsCn := cn.(*tls.Conn) // DialContext comment promises this will always succeed
 	return tlsCn, nil
+}
+
+func http2tlsUnderlyingConn(tc *tls.Conn) net.Conn {
+	return tc.NetConn()
 }
 
 var http2DebugGoroutines = os.Getenv("DEBUG_HTTP2_GOROUTINES") == "1"
@@ -3264,14 +3269,14 @@ const (
 	http2ClientPreface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
 
 	// SETTINGS_MAX_FRAME_SIZE default
-	// http://http2.github.io/http2-spec/#rfc.section.6.5.2
+	// https://httpwg.org/specs/rfc7540.html#rfc.section.6.5.2
 	http2initialMaxFrameSize = 16384
 
 	// NextProtoTLS is the NPN/ALPN protocol negotiated during
 	// HTTP/2's TLS setup.
 	http2NextProtoTLS = "h2"
 
-	// http://http2.github.io/http2-spec/#SettingValues
+	// https://httpwg.org/specs/rfc7540.html#SettingValues
 	http2initialHeaderTableSize = 4096
 
 	http2initialWindowSize = 65535 // 6.9.2 Initial Flow Control Window Size
@@ -3320,7 +3325,7 @@ func (st http2streamState) String() string {
 // Setting is a setting parameter: which setting it is, and its value.
 type http2Setting struct {
 	// ID is which setting is being set.
-	// See http://http2.github.io/http2-spec/#SettingValues
+	// See https://httpwg.org/specs/rfc7540.html#SettingFormat
 	ID http2SettingID
 
 	// Val is the value.
@@ -3352,7 +3357,7 @@ func (s http2Setting) Valid() error {
 }
 
 // A SettingID is an HTTP/2 setting as defined in
-// http://http2.github.io/http2-spec/#iana-settings
+// https://httpwg.org/specs/rfc7540.html#iana-settings
 type http2SettingID uint16
 
 const (
@@ -3384,10 +3389,11 @@ func (s http2SettingID) String() string {
 // name (key). See httpguts.ValidHeaderName for the base rules.
 //
 // Further, http2 says:
-//   "Just as in HTTP/1.x, header field names are strings of ASCII
-//   characters that are compared in a case-insensitive
-//   fashion. However, header field names MUST be converted to
-//   lowercase prior to their encoding in HTTP/2. "
+//
+//	"Just as in HTTP/1.x, header field names are strings of ASCII
+//	characters that are compared in a case-insensitive
+//	fashion. However, header field names MUST be converted to
+//	lowercase prior to their encoding in HTTP/2. "
 func http2validWireHeaderFieldName(v string) bool {
 	if len(v) == 0 {
 		return false
@@ -3578,8 +3584,8 @@ func (s *http2sorter) SortStrings(ss []string) {
 // validPseudoPath reports whether v is a valid :path pseudo-header
 // value. It must be either:
 //
-//     *) a non-empty string starting with '/'
-//     *) the string '*', for OPTIONS requests.
+//   - a non-empty string starting with '/'
+//   - the string '*', for OPTIONS requests.
 //
 // For now this is only used a quick check for deciding when to clean
 // up Opaque URLs before sending requests from the Transport.
@@ -4029,6 +4035,20 @@ type http2ServeConnOpts struct {
 	// requests. If nil, BaseConfig.Handler is used. If BaseConfig
 	// or BaseConfig.Handler is nil, http.DefaultServeMux is used.
 	Handler Handler
+
+	// UpgradeRequest is an initial request received on a connection
+	// undergoing an h2c upgrade. The request body must have been
+	// completely read from the connection before calling ServeConn,
+	// and the 101 Switching Protocols response written.
+	UpgradeRequest *Request
+
+	// Settings is the decoded contents of the HTTP2-Settings header
+	// in an h2c upgrade request.
+	Settings []byte
+
+	// SawClientPreface is set if the HTTP/2 connection preface
+	// has already been read from the connection.
+	SawClientPreface bool
 }
 
 func (o *http2ServeConnOpts) context() context.Context {
@@ -4097,6 +4117,7 @@ func (s *http2Server) ServeConn(c net.Conn, opts *http2ServeConnOpts) {
 		headerTableSize:             http2initialHeaderTableSize,
 		serveG:                      http2newGoroutineLock(),
 		pushEnabled:                 true,
+		sawClientPreface:            opts.SawClientPreface,
 	}
 
 	s.state.registerConn(sc)
@@ -4114,7 +4135,7 @@ func (s *http2Server) ServeConn(c net.Conn, opts *http2ServeConnOpts) {
 	if s.NewWriteScheduler != nil {
 		sc.writeSched = s.NewWriteScheduler()
 	} else {
-		sc.writeSched = http2NewRandomWriteScheduler()
+		sc.writeSched = http2NewPriorityWriteScheduler(nil)
 	}
 
 	// These start at the RFC-specified defaults. If there is a higher
@@ -4179,9 +4200,27 @@ func (s *http2Server) ServeConn(c net.Conn, opts *http2ServeConnOpts) {
 		}
 	}
 
+	if opts.Settings != nil {
+		fr := &http2SettingsFrame{
+			http2FrameHeader: http2FrameHeader{valid: true},
+			p:                opts.Settings,
+		}
+		if err := fr.ForeachSetting(sc.processSetting); err != nil {
+			sc.rejectConn(http2ErrCodeProtocol, "invalid settings")
+			return
+		}
+		opts.Settings = nil
+	}
+
 	if hook := http2testHookGetServerConn; hook != nil {
 		hook(sc)
 	}
+
+	if opts.UpgradeRequest != nil {
+		sc.upgradeRequest(opts.UpgradeRequest)
+		opts.UpgradeRequest = nil
+	}
+
 	sc.serve()
 }
 
@@ -4226,6 +4265,7 @@ type http2serverConn struct {
 	// Everything following is owned by the serve loop; use serveG.check():
 	serveG                      http2goroutineLock // used to verify funcs are on serve()
 	pushEnabled                 bool
+	sawClientPreface            bool // preface has already been read, used in h2c upgrade
 	sawFirstSettings            bool // got the initial SETTINGS frame after the preface
 	needToSendSettingsAck       bool
 	unackedSettings             int    // how many SETTINGS have we sent without ACKs?
@@ -4439,7 +4479,7 @@ func (sc *http2serverConn) canonicalHeader(v string) string {
 	// maxCachedCanonicalHeaders is an arbitrarily-chosen limit on the number of
 	// entries in the canonHeader cache. This should be larger than the number
 	// of unique, uncommon header keys likely to be sent by the peer, while not
-	// so high as to permit unreaasonable memory usage if the peer sends an unbounded
+	// so high as to permit unreasonable memory usage if the peer sends an unbounded
 	// number of unique header keys.
 	const maxCachedCanonicalHeaders = 32
 	if len(sc.canonHeader) < maxCachedCanonicalHeaders {
@@ -4693,6 +4733,9 @@ var http2errPrefaceTimeout = errors.New("timeout waiting for client preface")
 // returns errPrefaceTimeout on timeout, or an error if the greeting
 // is invalid.
 func (sc *http2serverConn) readPreface() error {
+	if sc.sawClientPreface {
+		return nil
+	}
 	errc := make(chan error, 1)
 	go func() {
 		// Read the client preface
@@ -5634,6 +5677,26 @@ func (sc *http2serverConn) processHeaders(f *http2MetaHeadersFrame) error {
 	return nil
 }
 
+func (sc *http2serverConn) upgradeRequest(req *Request) {
+	sc.serveG.check()
+	id := uint32(1)
+	sc.maxClientStreamID = id
+	st := sc.newStream(id, 0, http2stateHalfClosedRemote)
+	st.reqTrailer = req.Trailer
+	if st.reqTrailer != nil {
+		st.trailer = make(Header)
+	}
+	rw := sc.newResponseWriter(st, req)
+
+	// Disable any read deadline set by the net/http package
+	// prior to the upgrade.
+	if sc.hs.ReadTimeout != 0 {
+		sc.conn.SetReadDeadline(time.Time{})
+	}
+
+	go sc.runHandler(rw, req, sc.handler.ServeHTTP)
+}
+
 func (st *http2stream) processTrailerHeaders(f *http2MetaHeadersFrame) error {
 	sc := st.sc
 	sc.serveG.check()
@@ -5864,6 +5927,11 @@ func (sc *http2serverConn) newWriterAndRequestNoBody(st *http2stream, rp http2re
 	}
 	req = req.WithContext(st.ctx)
 
+	rw := sc.newResponseWriter(st, req)
+	return rw, req, nil
+}
+
+func (sc *http2serverConn) newResponseWriter(st *http2stream, req *Request) *http2responseWriter {
 	rws := http2responseWriterStatePool.Get().(*http2responseWriterState)
 	bwSave := rws.bw
 	*rws = http2responseWriterState{} // zero all the fields
@@ -5872,10 +5940,7 @@ func (sc *http2serverConn) newWriterAndRequestNoBody(st *http2stream, rp http2re
 	rws.bw.Reset(http2chunkWriter{rws})
 	rws.stream = st
 	rws.req = req
-	rws.body = body
-
-	rw := &http2responseWriter{rws: rws}
-	return rw, req, nil
+	return &http2responseWriter{rws: rws}
 }
 
 // Run on its own goroutine.
@@ -6035,17 +6100,18 @@ type http2requestBody struct {
 	_             http2incomparable
 	stream        *http2stream
 	conn          *http2serverConn
-	closed        bool       // for use by Close only
+	closeOnce     sync.Once  // for use by Close only
 	sawEOF        bool       // for use by Read only
 	pipe          *http2pipe // non-nil if we have a HTTP entity message body
 	needsContinue bool       // need to send a 100-continue
 }
 
 func (b *http2requestBody) Close() error {
-	if b.pipe != nil && !b.closed {
-		b.pipe.BreakWithError(http2errClosedBody)
-	}
-	b.closed = true
+	b.closeOnce.Do(func() {
+		if b.pipe != nil {
+			b.pipe.BreakWithError(http2errClosedBody)
+		}
+	})
 	return nil
 }
 
@@ -6089,7 +6155,6 @@ type http2responseWriterState struct {
 	// immutable within a request:
 	stream *http2stream
 	req    *Request
-	body   *http2requestBody // to close at end of request, if DATA frames didn't
 	conn   *http2serverConn
 
 	// TODO: adjust buffer writing sizes based on server config, frame size updates from peer, etc
@@ -6265,8 +6330,9 @@ func (rws *http2responseWriterState) writeChunk(p []byte) (n int, err error) {
 // prior to the headers being written. If the set of trailers is fixed
 // or known before the header is written, the normal Go trailers mechanism
 // is preferred:
-//    https://golang.org/pkg/net/http/#ResponseWriter
-//    https://golang.org/pkg/net/http/#example_ResponseWriter_trailers
+//
+//	https://golang.org/pkg/net/http/#ResponseWriter
+//	https://golang.org/pkg/net/http/#example_ResponseWriter_trailers
 const http2TrailerPrefix = "Trailer:"
 
 // promoteUndeclaredTrailers permits http.Handlers to set trailers
@@ -6362,8 +6428,7 @@ func http2checkWriteHeaderCode(code int) {
 	// Issue 22880: require valid WriteHeader status codes.
 	// For now we only enforce that it's three digits.
 	// In the future we might block things over 599 (600 and above aren't defined
-	// at http://httpwg.org/specs/rfc7231.html#status.codes)
-	// and we might block under 200 (once we have more mature 1xx support).
+	// at http://httpwg.org/specs/rfc7231.html#status.codes).
 	// But for now any three digits.
 	//
 	// We used to send "HTTP/1.1 000 0" on the wire in responses but there's
@@ -6384,13 +6449,41 @@ func (w *http2responseWriter) WriteHeader(code int) {
 }
 
 func (rws *http2responseWriterState) writeHeader(code int) {
-	if !rws.wroteHeader {
-		http2checkWriteHeaderCode(code)
-		rws.wroteHeader = true
-		rws.status = code
-		if len(rws.handlerHeader) > 0 {
-			rws.snapHeader = http2cloneHeader(rws.handlerHeader)
+	if rws.wroteHeader {
+		return
+	}
+
+	http2checkWriteHeaderCode(code)
+
+	// Handle informational headers
+	if code >= 100 && code <= 199 {
+		// Per RFC 8297 we must not clear the current header map
+		h := rws.handlerHeader
+
+		_, cl := h["Content-Length"]
+		_, te := h["Transfer-Encoding"]
+		if cl || te {
+			h = h.Clone()
+			h.Del("Content-Length")
+			h.Del("Transfer-Encoding")
 		}
+
+		if rws.conn.writeHeaders(rws.stream, &http2writeResHeaders{
+			streamID:    rws.stream.id,
+			httpResCode: code,
+			h:           h,
+			endStream:   rws.handlerDone && !rws.hasTrailers(),
+		}) != nil {
+			rws.dirty = true
+		}
+
+		return
+	}
+
+	rws.wroteHeader = true
+	rws.status = code
+	if len(rws.handlerHeader) > 0 {
+		rws.snapHeader = http2cloneHeader(rws.handlerHeader)
 	}
 }
 
@@ -7215,12 +7308,14 @@ func (t *http2Transport) RoundTripOpt(req *Request, opt http2RoundTripOpt) (*Res
 			if req, err = http2shouldRetryRequest(req, err); err == nil {
 				// After the first retry, do exponential backoff with 10% jitter.
 				if retry == 0 {
+					t.vlogf("RoundTrip retrying after failure: %v", err)
 					continue
 				}
 				backoff := float64(uint(1) << (uint(retry) - 1))
 				backoff += backoff * (0.1 * mathrand.Float64())
 				select {
 				case <-time.After(time.Second * time.Duration(backoff)):
+					t.vlogf("RoundTrip retrying after failure: %v", err)
 					continue
 				case <-req.Context().Done():
 					err = req.Context().Err()
@@ -7446,11 +7541,13 @@ func (cc *http2ClientConn) healthCheck() {
 	// trigger the healthCheck again if there is no frame received.
 	ctx, cancel := context.WithTimeout(context.Background(), pingTimeout)
 	defer cancel()
+	cc.vlogf("http2: Transport sending health check")
 	err := cc.Ping(ctx)
 	if err != nil {
+		cc.vlogf("http2: Transport health check failure: %v", err)
 		cc.closeForLostPing()
-		cc.t.connPool().MarkDead(cc)
-		return
+	} else {
+		cc.vlogf("http2: Transport health check success")
 	}
 }
 
@@ -7621,6 +7718,24 @@ func (cc *http2ClientConn) onIdleTimeout() {
 	cc.closeIfIdle()
 }
 
+func (cc *http2ClientConn) closeConn() error {
+	t := time.AfterFunc(250*time.Millisecond, cc.forceCloseConn)
+	defer t.Stop()
+	return cc.tconn.Close()
+}
+
+// A tls.Conn.Close can hang for a long time if the peer is unresponsive.
+// Try to shut it down more aggressively.
+func (cc *http2ClientConn) forceCloseConn() {
+	tc, ok := cc.tconn.(*tls.Conn)
+	if !ok {
+		return
+	}
+	if nc := http2tlsUnderlyingConn(tc); nc != nil {
+		nc.Close()
+	}
+}
+
 func (cc *http2ClientConn) closeIfIdle() {
 	cc.mu.Lock()
 	if len(cc.streams) > 0 || cc.streamsReserved > 0 {
@@ -7635,7 +7750,7 @@ func (cc *http2ClientConn) closeIfIdle() {
 	if http2VerboseLogs {
 		cc.vlogf("http2: Transport closing idle conn %p (forSingleUse=%v, maxStream=%v)", cc, cc.singleUse, nextID-2)
 	}
-	cc.tconn.Close()
+	cc.closeConn()
 }
 
 func (cc *http2ClientConn) isDoNotReuseAndIdle() bool {
@@ -7652,7 +7767,7 @@ func (cc *http2ClientConn) Shutdown(ctx context.Context) error {
 		return err
 	}
 	// Wait for all in-flight streams to complete or connection to close
-	done := make(chan error, 1)
+	done := make(chan struct{})
 	cancelled := false // guarded by cc.mu
 	go func() {
 		cc.mu.Lock()
@@ -7660,7 +7775,7 @@ func (cc *http2ClientConn) Shutdown(ctx context.Context) error {
 		for {
 			if len(cc.streams) == 0 || cc.closed {
 				cc.closed = true
-				done <- cc.tconn.Close()
+				close(done)
 				break
 			}
 			if cancelled {
@@ -7671,8 +7786,8 @@ func (cc *http2ClientConn) Shutdown(ctx context.Context) error {
 	}()
 	http2shutdownEnterWaitStateHook()
 	select {
-	case err := <-done:
-		return err
+	case <-done:
+		return cc.closeConn()
 	case <-ctx.Done():
 		cc.mu.Lock()
 		// Free the goroutine above
@@ -7715,9 +7830,9 @@ func (cc *http2ClientConn) closeForError(err error) error {
 	for _, cs := range cc.streams {
 		cs.abortStreamLocked(err)
 	}
-	defer cc.cond.Broadcast()
-	defer cc.mu.Unlock()
-	return cc.tconn.Close()
+	cc.cond.Broadcast()
+	cc.mu.Unlock()
+	return cc.closeConn()
 }
 
 // Close closes the client connection immediately.
@@ -8462,7 +8577,8 @@ func (cc *http2ClientConn) encodeHeaders(req *Request, addGzipHeader bool, trail
 		}
 		for _, v := range vv {
 			if !httpguts.ValidHeaderFieldValue(v) {
-				return nil, fmt.Errorf("invalid HTTP header value %q for header %q", v, k)
+				// Don't include the value in the error, because it may be sensitive.
+				return nil, fmt.Errorf("invalid HTTP header value for header %q", k)
 			}
 		}
 	}
@@ -8692,7 +8808,7 @@ func (cc *http2ClientConn) forgetStreamID(id uint32) {
 			cc.vlogf("http2: Transport closing idle conn %p (forSingleUse=%v, maxStream=%v)", cc, cc.singleUse, cc.nextStreamID-2)
 		}
 		cc.closed = true
-		defer cc.tconn.Close()
+		defer cc.closeConn()
 	}
 
 	cc.mu.Unlock()
@@ -8739,8 +8855,8 @@ func http2isEOFOrNetReadError(err error) bool {
 
 func (rl *http2clientConnReadLoop) cleanup() {
 	cc := rl.cc
-	defer cc.tconn.Close()
-	defer cc.t.connPool().MarkDead(cc)
+	cc.t.connPool().MarkDead(cc)
+	defer cc.closeConn()
 	defer close(cc.readerDone)
 
 	if cc.idleTimer != nil {
@@ -9595,7 +9711,13 @@ func (t *http2Transport) logf(format string, args ...interface{}) {
 	log.Printf(format, args...)
 }
 
-var http2noBody io.ReadCloser = ioutil.NopCloser(bytes.NewReader(nil))
+var http2noBody io.ReadCloser = http2noBodyReader{}
+
+type http2noBodyReader struct{}
+
+func (http2noBodyReader) Close() error { return nil }
+
+func (http2noBodyReader) Read([]byte) (int, error) { return 0, io.EOF }
 
 type http2missingBody struct{}
 
@@ -10719,16 +10841,15 @@ func (ws *http2priorityWriteScheduler) AdjustStream(streamID uint32, priority ht
 
 func (ws *http2priorityWriteScheduler) Push(wr http2FrameWriteRequest) {
 	var n *http2priorityNode
-	if id := wr.StreamID(); id == 0 {
+	if wr.isControl() {
 		n = &ws.root
 	} else {
+		id := wr.StreamID()
 		n = ws.nodes[id]
 		if n == nil {
 			// id is an idle or closed stream. wr should not be a HEADERS or
-			// DATA frame. However, wr can be a RST_STREAM. In this case, we
-			// push wr onto the root, rather than creating a new priorityNode,
-			// since RST_STREAM is tiny and the stream's priority is unknown
-			// anyway. See issue #17919.
+			// DATA frame. In other case, we push wr onto the root, rather
+			// than creating a new priorityNode.
 			if wr.DataSize() > 0 {
 				panic("add DATA on non-open stream")
 			}

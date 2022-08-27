@@ -46,8 +46,6 @@ type Node interface {
 	// Storage for analysis passes.
 	Esc() uint16
 	SetEsc(x uint16)
-	Diag() bool
-	SetDiag(x bool)
 
 	// Typecheck values:
 	//  0 means the node is not typechecked
@@ -118,7 +116,6 @@ const (
 	// Also used for a qualified package identifier that hasn't been resolved yet.
 	ONONAME
 	OTYPE    // type name
-	OPACK    // import
 	OLITERAL // literal
 	ONIL     // nil
 
@@ -155,7 +152,7 @@ const (
 	// Prior to walk, they are: X(Args), where Args is all regular arguments.
 	// After walk, if any argument whose evaluation might requires temporary variable,
 	// that temporary variable will be pushed to Init, Args will contains an updated
-	// set of arguments. KeepAlive is all OVARLIVE nodes that are attached to OCALLxxx.
+	// set of arguments.
 	OCALLFUNC  // X(Args) (function call f(args))
 	OCALLMETH  // X(Args) (direct method call x.Method(args))
 	OCALLINTER // X(Args) (interface method call x.Method(args))
@@ -241,7 +238,6 @@ const (
 	ORECV        // <-X
 	ORUNESTR     // Type(X) (Type is string, X is rune)
 	OSELRECV2    // like OAS2: Lhs = Rhs where len(Lhs)=2, len(Rhs)=1, Rhs[0].Op = ORECV (appears as .Var of OCASE)
-	OIOTA        // iota
 	OREAL        // real(X)
 	OIMAG        // imag(X)
 	OCOMPLEX     // complex(X, Y)
@@ -267,39 +263,18 @@ const (
 	ODEFER    // defer Call
 	OFALL     // fallthrough
 	OFOR      // for Init; Cond; Post { Body }
-	// OFORUNTIL is like OFOR, but the test (Cond) is applied after the body:
-	// 	Init
-	// 	top: { Body }   // Execute the body at least once
-	// 	cont: Post
-	// 	if Cond {        // And then test the loop condition
-	// 		List     // Before looping to top, execute List
-	// 		goto top
-	// 	}
-	// OFORUNTIL is created by walk. There's no way to write this in Go code.
-	OFORUNTIL
-	OGOTO   // goto Label
-	OIF     // if Init; Cond { Then } else { Else }
-	OLABEL  // Label:
-	OGO     // go Call
-	ORANGE  // for Key, Value = range X { Body }
-	ORETURN // return Results
-	OSELECT // select { Cases }
-	OSWITCH // switch Init; Expr { Cases }
+	OGOTO     // goto Label
+	OIF       // if Init; Cond { Then } else { Else }
+	OLABEL    // Label:
+	OGO       // go Call
+	ORANGE    // for Key, Value = range X { Body }
+	ORETURN   // return Results
+	OSELECT   // select { Cases }
+	OSWITCH   // switch Init; Expr { Cases }
 	// OTYPESW:  X := Y.(type) (appears as .Tag of OSWITCH)
 	//   X is nil if there is no type-switch variable
 	OTYPESW
 	OFUNCINST // instantiation of a generic function
-
-	// types
-	OTCHAN   // chan int
-	OTMAP    // map[string]int
-	OTSTRUCT // struct{}
-	OTINTER  // interface{}
-	// OTFUNC: func() - Recv is receiver field, Params is list of param fields, Results is
-	// list of result fields.
-	OTFUNC
-	OTARRAY // [8]int or [...]int
-	OTSLICE // []int
 
 	// misc
 	// intermediate representation of an inlined call.  Uses Init (assignments
@@ -313,12 +288,10 @@ const (
 	OSPTR          // base pointer of a slice or string.
 	OCFUNC         // reference to c function pointer (not go func value)
 	OCHECKNIL      // emit code to ensure pointer/interface not nil
-	OVARDEF        // variable is about to be fully initialized
-	OVARKILL       // variable is dead
-	OVARLIVE       // variable is alive
 	ORESULT        // result of a function call; Xoffset is stack offset
 	OINLMARK       // start of an inlined body, with file/line of caller. Xoffset is an index into the inline tree.
 	OLINKSYMOFFSET // offset within a name
+	OJUMPTABLE     // A jump table structure for implementing dense expression switches
 
 	// opcodes for generics
 	ODYNAMICDOTTYPE  // x = i.(T) where T is a type parameter (or derived from a type parameter)
@@ -467,11 +440,11 @@ const (
 	Noinline                    // func should not be inlined
 	NoCheckPtr                  // func should not be instrumented by checkptr
 	CgoUnsafeArgs               // treat a pointer to one arg as a pointer to them all
-	UintptrKeepAlive            // pointers converted to uintptr must be kept alive (compiler internal only)
+	UintptrKeepAlive            // pointers converted to uintptr must be kept alive
 	UintptrEscapes              // pointers converted to uintptr escape
 
 	// Runtime-only func pragmas.
-	// See ../../../../runtime/README.md for detailed descriptions.
+	// See ../../../../runtime/HACKING.md for detailed descriptions.
 	Systemstack        // func must run on system stack
 	Nowritebarrier     // emit compiler error instead of write barrier
 	Nowritebarrierrec  // error on write barrier in this or recursive callees
@@ -533,7 +506,7 @@ func HasNamedResults(fn *Func) bool {
 // their usage position.
 func HasUniquePos(n Node) bool {
 	switch n.Op() {
-	case ONAME, OPACK:
+	case ONAME:
 		return false
 	case OLITERAL, ONIL, OTYPE:
 		if n.Sym() != nil {
@@ -560,7 +533,8 @@ func SetPos(n Node) src.XPos {
 }
 
 // The result of InitExpr MUST be assigned back to n, e.g.
-// 	n.X = InitExpr(init, n.X)
+//
+//	n.X = InitExpr(init, n.X)
 func InitExpr(init []Node, expr Node) Node {
 	if len(init) == 0 {
 		return expr

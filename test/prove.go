@@ -735,8 +735,8 @@ func range1(b []int) {
 
 // range2 elements are larger, so they use the general form of a range loop.
 func range2(b [][32]int) {
-	for i, v := range b {
-		b[i][0] = v[0] + 1 // ERROR "Induction variable: limits \[0,\?\), increment 1$" "Proved IsInBounds$"
+	for i, v := range b { // ERROR "Induction variable: limits \[0,\?\), increment 1$"
+		b[i][0] = v[0] + 1 // ERROR "Proved IsInBounds$"
 		if i < len(b) {    // ERROR "Proved Less64$"
 			println("x")
 		}
@@ -1034,6 +1034,14 @@ func divShiftClean32(n int32) int32 {
 		return n
 	}
 	return n / int32(16) // ERROR "Proved Rsh32x64 shifts to zero"
+}
+
+func and(p []byte) ([]byte, []byte) { // issue #52563
+	const blocksize = 16
+	fullBlocks := len(p) &^ (blocksize - 1)
+	blk := p[:fullBlocks] // ERROR "Proved IsSliceInBounds$"
+	rem := p[fullBlocks:] // ERROR "Proved IsSliceInBounds$"
+	return blk, rem
 }
 
 //go:noinline

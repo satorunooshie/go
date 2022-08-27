@@ -132,7 +132,7 @@ func computeDeferReturn(ctxt *Link, deferReturnSym, s loader.Sym) uint32 {
 				switch target.Arch.Family {
 				case sys.AMD64, sys.I386:
 					deferreturn--
-				case sys.ARM, sys.ARM64, sys.MIPS, sys.MIPS64, sys.PPC64, sys.RISCV64:
+				case sys.ARM, sys.ARM64, sys.Loong64, sys.MIPS, sys.MIPS64, sys.PPC64, sys.RISCV64:
 					// no change
 				case sys.S390X:
 					deferreturn -= 2
@@ -222,7 +222,7 @@ func (state *pclntab) generatePCHeader(ctxt *Link) {
 
 		// Write header.
 		// Keep in sync with runtime/symtab.go:pcHeader and package debug/gosym.
-		header.SetUint32(ctxt.Arch, 0, 0xfffffff0)
+		header.SetUint32(ctxt.Arch, 0, 0xfffffff1)
 		header.SetUint8(ctxt.Arch, 6, uint8(ctxt.Arch.MinLC))
 		header.SetUint8(ctxt.Arch, 7, uint8(ctxt.Arch.PtrSize))
 		off := header.SetUint(ctxt.Arch, 8, uint64(state.nfunc))
@@ -353,21 +353,21 @@ func walkFilenames(ctxt *Link, funcs []loader.Sym, f func(*sym.CompilationUnit, 
 // This function creates a per-CU list of filenames if CU[M] references
 // files[1-N], the following is generated:
 //
-//  runtime.cutab:
-//    CU[M]
-//     offsetToFilename[0]
-//     offsetToFilename[1]
-//     ..
+//	runtime.cutab:
+//	  CU[M]
+//	   offsetToFilename[0]
+//	   offsetToFilename[1]
+//	   ..
 //
-//  runtime.filetab
-//     filename[0]
-//     filename[1]
+//	runtime.filetab
+//	   filename[0]
+//	   filename[1]
 //
 // Looking up a filename then becomes:
-//  0) Given a func, and filename index [K]
-//  1) Get Func.CUIndex:       M := func.cuOffset
-//  2) Find filename offset:   fileOffset := runtime.cutab[M+K]
-//  3) Get the filename:       getcstring(runtime.filetab[fileOffset])
+//  0. Given a func, and filename index [K]
+//  1. Get Func.CUIndex:       M := func.cuOffset
+//  2. Find filename offset:   fileOffset := runtime.cutab[M+K]
+//  3. Get the filename:       getcstring(runtime.filetab[fileOffset])
 func (state *pclntab) generateFilenameTabs(ctxt *Link, compUnits []*sym.CompilationUnit, funcs []loader.Sym) []uint32 {
 	// On a per-CU basis, keep track of all the filenames we need.
 	//
@@ -627,7 +627,7 @@ func writePCToFunc(ctxt *Link, sb *loader.SymbolBuilder, funcs []loader.Sym, sta
 func writeFuncs(ctxt *Link, sb *loader.SymbolBuilder, funcs []loader.Sym, inlSyms map[loader.Sym]loader.Sym, startLocations, cuOffsets []uint32, nameOffsets map[loader.Sym]uint32) {
 	ldr := ctxt.loader
 	deferReturnSym := ldr.Lookup("runtime.deferreturn", abiInternalVer)
-	gofunc := ldr.Lookup("go.func.*", 0)
+	gofunc := ldr.Lookup("go:func.*", 0)
 	gofuncBase := ldr.SymValue(gofunc)
 	textStart := ldr.SymValue(ldr.Lookup("runtime.text", 0))
 	funcdata := []loader.Sym{}
@@ -716,7 +716,7 @@ func writeFuncs(ctxt *Link, sb *loader.SymbolBuilder, funcs []loader.Sym, inlSym
 			}
 		}
 
-		// Write funcdata refs as offsets from go.func.* and go.funcrel.*.
+		// Write funcdata refs as offsets from go:func.* and go:funcrel.*.
 		funcdata = funcData(ldr, s, fi, inlSyms[s], funcdata)
 		// Missing funcdata will be ^0. See runtime/symtab.go:funcdata.
 		off = int64(startLocations[i] + funcSize + numPCData(ldr, s, fi)*4)
@@ -729,7 +729,7 @@ func writeFuncs(ctxt *Link, sb *loader.SymbolBuilder, funcs []loader.Sym, inlSym
 			}
 
 			if outer := ldr.OuterSym(fdsym); outer != gofunc {
-				panic(fmt.Sprintf("bad carrier sym for symbol %s (funcdata %s#%d), want go.func.* got %s", ldr.SymName(fdsym), ldr.SymName(s), j, ldr.SymName(outer)))
+				panic(fmt.Sprintf("bad carrier sym for symbol %s (funcdata %s#%d), want go:func.* got %s", ldr.SymName(fdsym), ldr.SymName(s), j, ldr.SymName(outer)))
 			}
 			sb.SetUint32(ctxt.Arch, dataoff, uint32(ldr.SymValue(fdsym)-gofuncBase))
 		}
@@ -804,7 +804,9 @@ func gorootFinal() string {
 func expandGoroot(s string) string {
 	const n = len("$GOROOT")
 	if len(s) >= n+1 && s[:n] == "$GOROOT" && (s[n] == '/' || s[n] == '\\') {
-		return filepath.ToSlash(filepath.Join(gorootFinal(), s[n:]))
+		if final := gorootFinal(); final != "" {
+			return filepath.ToSlash(filepath.Join(final, s[n:]))
+		}
 	}
 	return s
 }

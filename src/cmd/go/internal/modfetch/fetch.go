@@ -26,6 +26,7 @@ import (
 	"cmd/go/internal/lockedfile"
 	"cmd/go/internal/par"
 	"cmd/go/internal/robustio"
+	"cmd/go/internal/str"
 	"cmd/go/internal/trace"
 
 	"golang.org/x/mod/module"
@@ -102,7 +103,7 @@ func download(ctx context.Context, mod module.Version) (dir string, err error) {
 	// active.
 	parentDir := filepath.Dir(dir)
 	tmpPrefix := filepath.Base(dir) + ".tmp-"
-	if old, err := filepath.Glob(filepath.Join(parentDir, tmpPrefix+"*")); err == nil {
+	if old, err := filepath.Glob(filepath.Join(str.QuoteGlob(parentDir), str.QuoteGlob(tmpPrefix)+"*")); err == nil {
 		for _, path := range old {
 			RemoveAll(path) // best effort
 		}
@@ -224,7 +225,7 @@ func downloadZip(ctx context.Context, mod module.Version, zipfile string) (err e
 	// This is only safe to do because the lock file ensures that their
 	// writers are no longer active.
 	tmpPattern := filepath.Base(zipfile) + "*.tmp"
-	if old, err := filepath.Glob(filepath.Join(filepath.Dir(zipfile), tmpPattern)); err == nil {
+	if old, err := filepath.Glob(filepath.Join(str.QuoteGlob(filepath.Dir(zipfile)), tmpPattern)); err == nil {
 		for _, path := range old {
 			os.Remove(path) // best effort
 		}
@@ -241,7 +242,7 @@ func downloadZip(ctx context.Context, mod module.Version, zipfile string) (err e
 	// contents of the file (by hashing it) before we commit it. Because the file
 	// is zip-compressed, we need an actual file — or at least an io.ReaderAt — to
 	// validate it: we can't just tee the stream as we write it.
-	f, err := os.CreateTemp(filepath.Dir(zipfile), tmpPattern)
+	f, err := tempFile(filepath.Dir(zipfile), filepath.Base(zipfile), 0666)
 	if err != nil {
 		return err
 	}
@@ -319,7 +320,7 @@ func downloadZip(ctx context.Context, mod module.Version, zipfile string) (err e
 //
 // If the hash does not match go.sum (or the sumdb if enabled), hashZip returns
 // an error and does not write ziphashfile.
-func hashZip(mod module.Version, zipfile, ziphashfile string) error {
+func hashZip(mod module.Version, zipfile, ziphashfile string) (err error) {
 	hash, err := dirhash.HashZip(zipfile, dirhash.DefaultHash)
 	if err != nil {
 		return err
@@ -331,16 +332,17 @@ func hashZip(mod module.Version, zipfile, ziphashfile string) error {
 	if err != nil {
 		return err
 	}
+	defer func() {
+		if closeErr := hf.Close(); err == nil && closeErr != nil {
+			err = closeErr
+		}
+	}()
 	if err := hf.Truncate(int64(len(hash))); err != nil {
 		return err
 	}
 	if _, err := hf.WriteAt([]byte(hash), 0); err != nil {
 		return err
 	}
-	if err := hf.Close(); err != nil {
-		return err
-	}
-
 	return nil
 }
 
@@ -403,6 +405,28 @@ var goSum struct {
 
 type modSumStatus struct {
 	used, dirty bool
+}
+
+// Reset resets globals in the modfetch package, so previous loads don't affect
+// contents of go.sum files
+func Reset() {
+	GoSumFile = ""
+	WorkspaceGoSumFiles = nil
+
+	// Uses of lookupCache and downloadCache both can call checkModSum,
+	// which in turn sets the used bit on goSum.status for modules.
+	// Reset them so used can be computed properly.
+	lookupCache = par.Cache{}
+	downloadCache = par.Cache{}
+
+	// Clear all fields on goSum. It will be initialized later
+	goSum.mu.Lock()
+	goSum.m = nil
+	goSum.w = nil
+	goSum.status = nil
+	goSum.overwrite = false
+	goSum.enabled = false
+	goSum.mu.Unlock()
 }
 
 // initGoSum initializes the go.sum data.
@@ -809,6 +833,7 @@ Outer:
 		for _, m := range mods {
 			list := goSum.m[m]
 			sort.Strings(list)
+			str.Uniq(&list)
 			for _, h := range list {
 				st := goSum.status[modSum{m, h}]
 				if (!st.dirty || (st.used && keep[m])) && !sumInWorkspaceModulesLocked(m) {

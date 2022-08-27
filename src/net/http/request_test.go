@@ -982,6 +982,12 @@ func TestMaxBytesReaderDifferentLimits(t *testing.T) {
 			wantN:   len(testStr),
 			wantErr: false,
 		},
+		10: { /* Issue 54408 */
+			limit:   int64(1<<63-1),
+			lenP:    len(testStr),
+			wantN:   len(testStr),
+			wantErr: false,
+		},
 	}
 	for i, tt := range tests {
 		rc := MaxBytesReader(nil, io.NopCloser(strings.NewReader(testStr)), tt.limit)
@@ -998,23 +1004,15 @@ func TestMaxBytesReaderDifferentLimits(t *testing.T) {
 	}
 }
 
-func TestWithContextDeepCopiesURL(t *testing.T) {
+func TestWithContextNilURL(t *testing.T) {
 	req, err := NewRequest("POST", "https://golang.org/", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	reqCopy := req.WithContext(context.Background())
-	reqCopy.URL.Scheme = "http"
-
-	firstURL, secondURL := req.URL.String(), reqCopy.URL.String()
-	if firstURL == secondURL {
-		t.Errorf("unexpected change to original request's URL")
-	}
-
-	// And also check we don't crash on nil (Issue 20601)
+	// Issue 20601
 	req.URL = nil
-	reqCopy = req.WithContext(context.Background())
+	reqCopy := req.WithContext(context.Background())
 	if reqCopy.URL != nil {
 		t.Error("expected nil URL in cloned request")
 	}
@@ -1183,6 +1181,47 @@ func testMultipartFile(t *testing.T, req *Request, key, expectFilename, expectCo
 		t.Errorf("contents = %q, want %q", g, expectContent)
 	}
 	return f
+}
+
+// Issue 53181: verify Request.Cookie return the correct Cookie.
+// Return ErrNoCookie instead of the first cookie when name is "".
+func TestRequestCookie(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		value       string
+		expectedErr error
+	}{
+		{
+			name:        "foo",
+			value:       "bar",
+			expectedErr: nil,
+		},
+		{
+			name:        "",
+			expectedErr: ErrNoCookie,
+		},
+	} {
+		req, err := NewRequest("GET", "http://example.com/", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.AddCookie(&Cookie{Name: tt.name, Value: tt.value})
+		c, err := req.Cookie(tt.name)
+		if err != tt.expectedErr {
+			t.Errorf("got %v, want %v", err, tt.expectedErr)
+		}
+
+		// skip if error occured.
+		if err != nil {
+			continue
+		}
+		if c.Value != tt.value {
+			t.Errorf("got %v, want %v", c.Value, tt.value)
+		}
+		if c.Name != tt.name {
+			t.Errorf("got %s, want %v", tt.name, c.Name)
+		}
+	}
 }
 
 const (

@@ -52,6 +52,14 @@
 (Hmul32 x y)  => (SRAI [32] (MUL  (SignExt32to64 x) (SignExt32to64 y)))
 (Hmul32u x y) => (SRLI [32] (MUL  (ZeroExt32to64 x) (ZeroExt32to64 y)))
 
+(Select0 (Add64carry x y c)) => (ADD (ADD <typ.UInt64> x y) c)
+(Select1 (Add64carry x y c)) =>
+	(OR (SLTU <typ.UInt64> s:(ADD <typ.UInt64> x y) x) (SLTU <typ.UInt64> (ADD <typ.UInt64> s c) s))
+
+(Select0 (Sub64borrow x y c)) => (SUB (SUB <typ.UInt64> x y) c)
+(Select1 (Sub64borrow x y c)) =>
+	(OR (SLTU <typ.UInt64> x s:(SUB <typ.UInt64> x y)) (SLTU <typ.UInt64> s (SUB <typ.UInt64> s c)))
+
 // (x + y) / 2 => (x / 2) + (y / 2) + (x & y & 1)
 (Avg64u <t> x y) => (ADD (ADD <t> (SRLI <t> [1] x) (SRLI <t> [1] y)) (ANDI <t> [1] (AND <t> x y)))
 
@@ -256,7 +264,7 @@
 (Leq64F ...) => (FLED ...)
 (Leq32F ...) => (FLES ...)
 
-(EqPtr x y) => (SEQZ (SUB <x.Type> x y))
+(EqPtr x y) => (SEQZ (SUB <typ.Uintptr> x y))
 (Eq64  x y) => (SEQZ (SUB <x.Type> x y))
 (Eq32  x y) => (SEQZ (SUB <x.Type> (ZeroExt32to64 x) (ZeroExt32to64 y)))
 (Eq16  x y) => (SEQZ (SUB <x.Type> (ZeroExt16to64 x) (ZeroExt16to64 y)))
@@ -264,7 +272,7 @@
 (Eq64F ...) => (FEQD ...)
 (Eq32F ...) => (FEQS ...)
 
-(NeqPtr x y) => (SNEZ (SUB <x.Type> x y))
+(NeqPtr x y) => (SNEZ (SUB <typ.Uintptr> x y))
 (Neq64  x y) => (SNEZ (SUB <x.Type> x y))
 (Neq32  x y) => (SNEZ (SUB <x.Type> (ZeroExt32to64 x) (ZeroExt32to64 y)))
 (Neq16  x y) => (SNEZ (SUB <x.Type> (ZeroExt16to64 x) (ZeroExt16to64 y)))
@@ -583,7 +591,7 @@
 (AtomicOr32  ...) => (LoweredAtomicOr32  ...)
 
 // Conditional branches
-(If cond yes no) => (BNEZ cond yes no)
+(If cond yes no) => (BNEZ (MOVBUreg <typ.UInt64> cond) yes no)
 
 // Optimizations
 
@@ -620,6 +628,10 @@
 (MOVHstore [off] {sym} ptr (MOVDconst [0]) mem) => (MOVHstorezero [off] {sym} ptr mem)
 (MOVWstore [off] {sym} ptr (MOVDconst [0]) mem) => (MOVWstorezero [off] {sym} ptr mem)
 (MOVDstore [off] {sym} ptr (MOVDconst [0]) mem) => (MOVDstorezero [off] {sym} ptr mem)
+
+// Boolean ops are already extended.
+(MOVBUreg x:((SEQZ|SNEZ) _)) => x
+(MOVBUreg x:((SLT|SLTU) _ _)) => x
 
 // Avoid sign/zero extension for consts.
 (MOVBreg  (MOVDconst [c])) => (MOVDconst [int64(int8(c))])
@@ -731,13 +743,20 @@
 (NEGW (MOVDconst [x])) => (MOVDconst [int64(int32(-x))])
 
 // Shift of a constant.
-(SLLI [x] (MOVDconst [y])) && is32Bit(y << x) => (MOVDconst [y << x])
-(SRLI [x] (MOVDconst [y])) => (MOVDconst [int64(uint64(y) >> x)])
-(SRAI [x] (MOVDconst [y])) => (MOVDconst [int64(y) >> x])
+(SLLI [x] (MOVDconst [y])) && is32Bit(y << uint32(x)) => (MOVDconst [y << uint32(x)])
+(SRLI [x] (MOVDconst [y])) => (MOVDconst [int64(uint64(y) >> uint32(x))])
+(SRAI [x] (MOVDconst [y])) => (MOVDconst [int64(y) >> uint32(x)])
 
 // SLTI/SLTIU with constants.
 (SLTI  [x] (MOVDconst [y])) => (MOVDconst [b2i(int64(y) < int64(x))])
 (SLTIU [x] (MOVDconst [y])) => (MOVDconst [b2i(uint64(y) < uint64(x))])
+
+(SLT x x)  => (MOVDconst [0])
+(SLTU x x) => (MOVDconst [0])
+
+// deadcode for LoweredMuluhilo
+(Select0 m:(LoweredMuluhilo x y)) && m.Uses == 1 => (MULHU x y)
+(Select1 m:(LoweredMuluhilo x y)) && m.Uses == 1 => (MUL x y)
 
 // Merge negation into fused multiply-add and multiply-subtract.
 //

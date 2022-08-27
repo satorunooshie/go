@@ -114,31 +114,57 @@ func (g *irgen) funcDecl(out *ir.Nodes, decl *syntax.FuncDecl) {
 		// the Fields to represent the receiver's method set.
 		if recv := fn.Type().Recv(); recv != nil {
 			typ := types.ReceiverBaseType(recv.Type)
-			if typ.OrigSym() != nil {
+			if orig := typ.OrigType(); orig != nil {
 				// For a generic method, we mark the methods on the
 				// base generic type, since those are the methods
 				// that will be stenciled.
-				typ = typ.OrigSym().Def.Type()
+				typ = orig
 			}
 			meth := typecheck.Lookdot1(fn, typecheck.Lookup(decl.Name.Value), typ, typ.Methods(), 0)
 			meth.SetNointerface(true)
 		}
 	}
 
-	if decl.Body != nil && fn.Pragma&ir.Noescape != 0 {
-		base.ErrorfAt(fn.Pos(), "can only use //go:noescape with external func implementations")
+	if decl.Body != nil {
+		if fn.Pragma&ir.Noescape != 0 {
+			base.ErrorfAt(fn.Pos(), "can only use //go:noescape with external func implementations")
+		}
+		if (fn.Pragma&ir.UintptrKeepAlive != 0 && fn.Pragma&ir.UintptrEscapes == 0) && fn.Pragma&ir.Nosplit == 0 {
+			// Stack growth can't handle uintptr arguments that may
+			// be pointers (as we don't know which are pointers
+			// when creating the stack map). Thus uintptrkeepalive
+			// functions (and all transitive callees) must be
+			// nosplit.
+			//
+			// N.B. uintptrescapes implies uintptrkeepalive but it
+			// is OK since the arguments must escape to the heap.
+			//
+			// TODO(prattmic): Add recursive nosplit check of callees.
+			// TODO(prattmic): Functions with no body (i.e.,
+			// assembly) must also be nosplit, but we can't check
+			// that here.
+			base.ErrorfAt(fn.Pos(), "go:uintptrkeepalive requires go:nosplit")
+		}
 	}
 
 	if decl.Name.Value == "init" && decl.Recv == nil {
 		g.target.Inits = append(g.target.Inits, fn)
 	}
 
-	haveEmbed := g.haveEmbed
+	saveHaveEmbed := g.haveEmbed
+	saveCurDecl := g.curDecl
 	g.curDecl = ""
 	g.later(func() {
-		defer func(b bool) { g.haveEmbed = b }(g.haveEmbed)
+		defer func(b bool, s string) {
+			// Revert haveEmbed and curDecl back to what they were before
+			// the "later" function.
+			g.haveEmbed = b
+			g.curDecl = s
+		}(g.haveEmbed, g.curDecl)
 
-		g.haveEmbed = haveEmbed
+		// Set haveEmbed and curDecl to what they were for this funcDecl.
+		g.haveEmbed = saveHaveEmbed
+		g.curDecl = saveCurDecl
 		if fn.Type().HasTParam() {
 			g.topFuncIsGeneric = true
 		}
@@ -162,9 +188,10 @@ func (g *irgen) funcDecl(out *ir.Nodes, decl *syntax.FuncDecl) {
 func (g *irgen) typeDecl(out *ir.Nodes, decl *syntax.TypeDecl) {
 	// Set the position for any error messages we might print (e.g. too large types).
 	base.Pos = g.pos(decl)
-	assert(g.curDecl == "")
+	assert(ir.CurFunc != nil || g.curDecl == "")
 	// Set g.curDecl to the type name, as context for the type params declared
 	// during types2-to-types1 translation if this is a generic type.
+	saveCurDecl := g.curDecl
 	g.curDecl = decl.Name.Value
 	if decl.Alias {
 		name, _ := g.def(decl.Name)
@@ -225,7 +252,7 @@ func (g *irgen) typeDecl(out *ir.Nodes, decl *syntax.TypeDecl) {
 	}
 	types.ResumeCheckSize()
 
-	g.curDecl = ""
+	g.curDecl = saveCurDecl
 	if otyp, ok := otyp.(*types2.Named); ok && otyp.NumMethods() != 0 {
 		methods := make([]*types.Field, otyp.NumMethods())
 		for i := range methods {

@@ -12,7 +12,7 @@ package sys
 func RaceDetectorSupported(goos, goarch string) bool {
 	switch goos {
 	case "linux":
-		return goarch == "amd64" || goarch == "ppc64le" || goarch == "arm64"
+		return goarch == "amd64" || goarch == "ppc64le" || goarch == "arm64" || goarch == "s390x"
 	case "darwin":
 		return goarch == "amd64" || goarch == "arm64"
 	case "freebsd", "netbsd", "openbsd", "windows":
@@ -40,7 +40,7 @@ func MSanSupported(goos, goarch string) bool {
 func ASanSupported(goos, goarch string) bool {
 	switch goos {
 	case "linux":
-		return goarch == "arm64" || goarch == "amd64"
+		return goarch == "arm64" || goarch == "amd64" || goarch == "riscv64" || goarch == "ppc64le"
 	default:
 		return false
 	}
@@ -50,7 +50,7 @@ func ASanSupported(goos, goarch string) bool {
 // ('go test -fuzz=.').
 func FuzzSupported(goos, goarch string) bool {
 	switch goos {
-	case "darwin", "linux", "windows":
+	case "darwin", "freebsd", "linux", "windows":
 		return true
 	default:
 		return false

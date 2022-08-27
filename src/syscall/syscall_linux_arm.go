@@ -6,12 +6,6 @@ package syscall
 
 import "unsafe"
 
-// archHonorsR2 captures the fact that r2 is honored by the
-// runtime.GOARCH.  Syscall conventions are generally r1, r2, err :=
-// syscall(trap, ...).  Not all architectures define r2 in their
-// ABI. See "man syscall". [EABI assumed.]
-const archHonorsR2 = true
-
 const _SYS_setgroups = SYS_SETGROUPS32
 
 func setTimespec(sec, nsec int64) Timespec {
@@ -34,7 +28,6 @@ func Seek(fd int, offset int64, whence int) (newoffset int64, err error) {
 	return newoffset, nil
 }
 
-//sys	accept(s int, rsa *RawSockaddrAny, addrlen *_Socklen) (fd int, err error)
 //sys	accept4(s int, rsa *RawSockaddrAny, addrlen *_Socklen, flags int) (fd int, err error)
 //sys	bind(s int, addr unsafe.Pointer, addrlen _Socklen) (err error)
 //sys	connect(s int, addr unsafe.Pointer, addrlen _Socklen) (err error)
@@ -53,7 +46,6 @@ func Seek(fd int, offset int64, whence int) (newoffset int64, err error) {
 // 64-bit file system and 32-bit uid calls
 // (16-bit uid calls are not always supported in newer kernels)
 //sys	Dup2(oldfd int, newfd int) (err error)
-//sysnb	EpollCreate(size int) (fd int, err error)
 //sys	Fchown(fd int, uid int, gid int) (err error) = SYS_FCHOWN32
 //sys	Fstat(fd int, stat *Stat_t) (err error) = SYS_FSTAT64
 //sys	fstatat(dirfd int, path string, stat *Stat_t, flags int) (err error) = SYS_FSTATAT64
@@ -79,8 +71,8 @@ func Seek(fd int, offset int64, whence int) (newoffset int64, err error) {
 //sys	Utime(path string, buf *Utimbuf) (err error)
 //sys	utimes(path string, times *[2]Timeval) (err error)
 
-//sys   Pread(fd int, p []byte, offset int64) (n int, err error) = SYS_PREAD64
-//sys   Pwrite(fd int, p []byte, offset int64) (n int, err error) = SYS_PWRITE64
+//sys   pread(fd int, p []byte, offset int64) (n int, err error) = SYS_PREAD64
+//sys   pwrite(fd int, p []byte, offset int64) (n int, err error) = SYS_PWRITE64
 //sys	Truncate(path string, length int64) (err error) = SYS_TRUNCATE64
 //sys	Ftruncate(fd int, length int64) (err error) = SYS_FTRUNCATE64
 

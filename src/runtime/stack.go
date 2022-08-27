@@ -151,15 +151,17 @@ const (
 
 // Global pool of spans that have free stacks.
 // Stacks are assigned an order according to size.
-//     order = log_2(size/FixedStack)
+//
+//	order = log_2(size/FixedStack)
+//
 // There is a free list for each order.
 var stackpool [_NumStackOrders]struct {
 	item stackpoolItem
-	_    [cpu.CacheLinePadSize - unsafe.Sizeof(stackpoolItem{})%cpu.CacheLinePadSize]byte
+	_    [(cpu.CacheLinePadSize - unsafe.Sizeof(stackpoolItem{})%cpu.CacheLinePadSize) % cpu.CacheLinePadSize]byte
 }
 
-//go:notinheap
 type stackpoolItem struct {
+	_    sys.NotInHeap
 	mu   mutex
 	span mSpanList
 }
@@ -884,7 +886,7 @@ func copystack(gp *g, newsize uintptr) {
 	// Adjust sudogs, synchronizing with channel ops if necessary.
 	ncopy := used
 	if !gp.activeStackChans {
-		if newsize < old.hi-old.lo && atomic.Load8(&gp.parkingOnChan) != 0 {
+		if newsize < old.hi-old.lo && gp.parkingOnChan.Load() {
 			// It's not safe for someone to shrink this stack while we're actively
 			// parking on a channel, but it is safe to grow since we do that
 			// ourselves and explicitly don't want to synchronize with channels
@@ -1148,7 +1150,7 @@ func isShrinkStackSafe(gp *g) bool {
 	// We also can't *shrink* the stack in the window between the
 	// goroutine calling gopark to park on a channel and
 	// gp.activeStackChans being set.
-	return gp.syscallsp == 0 && !gp.asyncSafePoint && atomic.Load8(&gp.parkingOnChan) == 0
+	return gp.syscallsp == 0 && !gp.asyncSafePoint && !gp.parkingOnChan.Load()
 }
 
 // Maybe shrink the stack being used by gp.
@@ -1332,7 +1334,8 @@ func getStackMap(frame *stkframe, cache *pcvalueCache, debug bool) (locals, args
 	}
 
 	// stack objects.
-	if (GOARCH == "amd64" || GOARCH == "arm64" || GOARCH == "ppc64" || GOARCH == "ppc64le") && unsafe.Sizeof(abi.RegArgs{}) > 0 && frame.argmap != nil {
+	if (GOARCH == "amd64" || GOARCH == "arm64" || GOARCH == "ppc64" || GOARCH == "ppc64le" || GOARCH == "riscv64") &&
+		unsafe.Sizeof(abi.RegArgs{}) > 0 && frame.argmap != nil {
 		// argmap is set when the function is reflect.makeFuncStub or reflect.methodValueCall.
 		// We don't actually use argmap in this case, but we need to fake the stack object
 		// record for these frames which contain an internal/abi.RegArgs at a hard-coded offset.
@@ -1343,7 +1346,8 @@ func getStackMap(frame *stkframe, cache *pcvalueCache, debug bool) (locals, args
 		if p != nil {
 			n := *(*uintptr)(p)
 			p = add(p, goarch.PtrSize)
-			*(*slice)(unsafe.Pointer(&objs)) = slice{array: noescape(p), len: int(n), cap: int(n)}
+			r0 := (*stackObjectRecord)(noescape(p))
+			objs = unsafe.Slice(r0, int(n))
 			// Note: the noescape above is needed to keep
 			// getStackMap from "leaking param content:
 			// frame".  That leak propagates up to getgcmask, then
@@ -1431,4 +1435,50 @@ func (r *stackObjectRecord) gcdata() *byte {
 //go:linkname morestackc
 func morestackc() {
 	throw("attempt to execute system stack code on user stack")
+}
+
+// startingStackSize is the amount of stack that new goroutines start with.
+// It is a power of 2, and between _FixedStack and maxstacksize, inclusive.
+// startingStackSize is updated every GC by tracking the average size of
+// stacks scanned during the GC.
+var startingStackSize uint32 = _FixedStack
+
+func gcComputeStartingStackSize() {
+	if debug.adaptivestackstart == 0 {
+		return
+	}
+	// For details, see the design doc at
+	// https://docs.google.com/document/d/1YDlGIdVTPnmUiTAavlZxBI1d9pwGQgZT7IKFKlIXohQ/edit?usp=sharing
+	// The basic algorithm is to track the average size of stacks
+	// and start goroutines with stack equal to that average size.
+	// Starting at the average size uses at most 2x the space that
+	// an ideal algorithm would have used.
+	// This is just a heuristic to avoid excessive stack growth work
+	// early in a goroutine's lifetime. See issue 18138. Stacks that
+	// are allocated too small can still grow, and stacks allocated
+	// too large can still shrink.
+	var scannedStackSize uint64
+	var scannedStacks uint64
+	for _, p := range allp {
+		scannedStackSize += p.scannedStackSize
+		scannedStacks += p.scannedStacks
+		// Reset for next time
+		p.scannedStackSize = 0
+		p.scannedStacks = 0
+	}
+	if scannedStacks == 0 {
+		startingStackSize = _FixedStack
+		return
+	}
+	avg := scannedStackSize/scannedStacks + _StackGuard
+	// Note: we add _StackGuard to ensure that a goroutine that
+	// uses the average space will not trigger a growth.
+	if avg > uint64(maxstacksize) {
+		avg = uint64(maxstacksize)
+	}
+	if avg < _FixedStack {
+		avg = _FixedStack
+	}
+	// Note: maxstacksize fits in 30 bits, so avg also does.
+	startingStackSize = uint32(round2(int32(avg)))
 }

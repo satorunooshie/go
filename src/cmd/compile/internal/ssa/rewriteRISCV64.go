@@ -509,10 +509,14 @@ func rewriteValueRISCV64(v *Value) bool {
 		return rewriteValueRISCV64_OpRISCV64SLL(v)
 	case OpRISCV64SLLI:
 		return rewriteValueRISCV64_OpRISCV64SLLI(v)
+	case OpRISCV64SLT:
+		return rewriteValueRISCV64_OpRISCV64SLT(v)
 	case OpRISCV64SLTI:
 		return rewriteValueRISCV64_OpRISCV64SLTI(v)
 	case OpRISCV64SLTIU:
 		return rewriteValueRISCV64_OpRISCV64SLTIU(v)
+	case OpRISCV64SLTU:
+		return rewriteValueRISCV64_OpRISCV64SLTU(v)
 	case OpRISCV64SRA:
 		return rewriteValueRISCV64_OpRISCV64SRA(v)
 	case OpRISCV64SRAI:
@@ -605,6 +609,10 @@ func rewriteValueRISCV64(v *Value) bool {
 		return rewriteValueRISCV64_OpRsh8x64(v)
 	case OpRsh8x8:
 		return rewriteValueRISCV64_OpRsh8x8(v)
+	case OpSelect0:
+		return rewriteValueRISCV64_OpSelect0(v)
+	case OpSelect1:
+		return rewriteValueRISCV64_OpSelect1(v)
 	case OpSignExt16to32:
 		v.Op = OpRISCV64MOVHreg
 		return true
@@ -1124,13 +1132,14 @@ func rewriteValueRISCV64_OpEqPtr(v *Value) bool {
 	v_1 := v.Args[1]
 	v_0 := v.Args[0]
 	b := v.Block
+	typ := &b.Func.Config.Types
 	// match: (EqPtr x y)
-	// result: (SEQZ (SUB <x.Type> x y))
+	// result: (SEQZ (SUB <typ.Uintptr> x y))
 	for {
 		x := v_0
 		y := v_1
 		v.reset(OpRISCV64SEQZ)
-		v0 := b.NewValue0(v.Pos, OpRISCV64SUB, x.Type)
+		v0 := b.NewValue0(v.Pos, OpRISCV64SUB, typ.Uintptr)
 		v0.AddArg2(x, y)
 		v.AddArg(v0)
 		return true
@@ -2673,13 +2682,14 @@ func rewriteValueRISCV64_OpNeqPtr(v *Value) bool {
 	v_1 := v.Args[1]
 	v_0 := v.Args[0]
 	b := v.Block
+	typ := &b.Func.Config.Types
 	// match: (NeqPtr x y)
-	// result: (SNEZ (SUB <x.Type> x y))
+	// result: (SNEZ (SUB <typ.Uintptr> x y))
 	for {
 		x := v_0
 		y := v_1
 		v.reset(OpRISCV64SNEZ)
-		v0 := b.NewValue0(v.Pos, OpRISCV64SUB, x.Type)
+		v0 := b.NewValue0(v.Pos, OpRISCV64SUB, typ.Uintptr)
 		v0.AddArg2(x, y)
 		v.AddArg(v0)
 		return true
@@ -3150,6 +3160,46 @@ func rewriteValueRISCV64_OpRISCV64MOVBUload(v *Value) bool {
 func rewriteValueRISCV64_OpRISCV64MOVBUreg(v *Value) bool {
 	v_0 := v.Args[0]
 	b := v.Block
+	// match: (MOVBUreg x:(SEQZ _))
+	// result: x
+	for {
+		x := v_0
+		if x.Op != OpRISCV64SEQZ {
+			break
+		}
+		v.copyOf(x)
+		return true
+	}
+	// match: (MOVBUreg x:(SNEZ _))
+	// result: x
+	for {
+		x := v_0
+		if x.Op != OpRISCV64SNEZ {
+			break
+		}
+		v.copyOf(x)
+		return true
+	}
+	// match: (MOVBUreg x:(SLT _ _))
+	// result: x
+	for {
+		x := v_0
+		if x.Op != OpRISCV64SLT {
+			break
+		}
+		v.copyOf(x)
+		return true
+	}
+	// match: (MOVBUreg x:(SLTU _ _))
+	// result: x
+	for {
+		x := v_0
+		if x.Op != OpRISCV64SLTU {
+			break
+		}
+		v.copyOf(x)
+		return true
+	}
 	// match: (MOVBUreg (MOVDconst [c]))
 	// result: (MOVDconst [int64(uint8(c))])
 	for {
@@ -4801,19 +4851,35 @@ func rewriteValueRISCV64_OpRISCV64SLL(v *Value) bool {
 func rewriteValueRISCV64_OpRISCV64SLLI(v *Value) bool {
 	v_0 := v.Args[0]
 	// match: (SLLI [x] (MOVDconst [y]))
-	// cond: is32Bit(y << x)
-	// result: (MOVDconst [y << x])
+	// cond: is32Bit(y << uint32(x))
+	// result: (MOVDconst [y << uint32(x)])
 	for {
 		x := auxIntToInt64(v.AuxInt)
 		if v_0.Op != OpRISCV64MOVDconst {
 			break
 		}
 		y := auxIntToInt64(v_0.AuxInt)
-		if !(is32Bit(y << x)) {
+		if !(is32Bit(y << uint32(x))) {
 			break
 		}
 		v.reset(OpRISCV64MOVDconst)
-		v.AuxInt = int64ToAuxInt(y << x)
+		v.AuxInt = int64ToAuxInt(y << uint32(x))
+		return true
+	}
+	return false
+}
+func rewriteValueRISCV64_OpRISCV64SLT(v *Value) bool {
+	v_1 := v.Args[1]
+	v_0 := v.Args[0]
+	// match: (SLT x x)
+	// result: (MOVDconst [0])
+	for {
+		x := v_0
+		if x != v_1 {
+			break
+		}
+		v.reset(OpRISCV64MOVDconst)
+		v.AuxInt = int64ToAuxInt(0)
 		return true
 	}
 	return false
@@ -4850,6 +4916,22 @@ func rewriteValueRISCV64_OpRISCV64SLTIU(v *Value) bool {
 	}
 	return false
 }
+func rewriteValueRISCV64_OpRISCV64SLTU(v *Value) bool {
+	v_1 := v.Args[1]
+	v_0 := v.Args[0]
+	// match: (SLTU x x)
+	// result: (MOVDconst [0])
+	for {
+		x := v_0
+		if x != v_1 {
+			break
+		}
+		v.reset(OpRISCV64MOVDconst)
+		v.AuxInt = int64ToAuxInt(0)
+		return true
+	}
+	return false
+}
 func rewriteValueRISCV64_OpRISCV64SRA(v *Value) bool {
 	v_1 := v.Args[1]
 	v_0 := v.Args[0]
@@ -4871,7 +4953,7 @@ func rewriteValueRISCV64_OpRISCV64SRA(v *Value) bool {
 func rewriteValueRISCV64_OpRISCV64SRAI(v *Value) bool {
 	v_0 := v.Args[0]
 	// match: (SRAI [x] (MOVDconst [y]))
-	// result: (MOVDconst [int64(y) >> x])
+	// result: (MOVDconst [int64(y) >> uint32(x)])
 	for {
 		x := auxIntToInt64(v.AuxInt)
 		if v_0.Op != OpRISCV64MOVDconst {
@@ -4879,7 +4961,7 @@ func rewriteValueRISCV64_OpRISCV64SRAI(v *Value) bool {
 		}
 		y := auxIntToInt64(v_0.AuxInt)
 		v.reset(OpRISCV64MOVDconst)
-		v.AuxInt = int64ToAuxInt(int64(y) >> x)
+		v.AuxInt = int64ToAuxInt(int64(y) >> uint32(x))
 		return true
 	}
 	return false
@@ -4905,7 +4987,7 @@ func rewriteValueRISCV64_OpRISCV64SRL(v *Value) bool {
 func rewriteValueRISCV64_OpRISCV64SRLI(v *Value) bool {
 	v_0 := v.Args[0]
 	// match: (SRLI [x] (MOVDconst [y]))
-	// result: (MOVDconst [int64(uint64(y) >> x)])
+	// result: (MOVDconst [int64(uint64(y) >> uint32(x))])
 	for {
 		x := auxIntToInt64(v.AuxInt)
 		if v_0.Op != OpRISCV64MOVDconst {
@@ -4913,7 +4995,7 @@ func rewriteValueRISCV64_OpRISCV64SRLI(v *Value) bool {
 		}
 		y := auxIntToInt64(v_0.AuxInt)
 		v.reset(OpRISCV64MOVDconst)
-		v.AuxInt = int64ToAuxInt(int64(uint64(y) >> x))
+		v.AuxInt = int64ToAuxInt(int64(uint64(y) >> uint32(x)))
 		return true
 	}
 	return false
@@ -5988,6 +6070,124 @@ func rewriteValueRISCV64_OpRsh8x8(v *Value) bool {
 		return true
 	}
 }
+func rewriteValueRISCV64_OpSelect0(v *Value) bool {
+	v_0 := v.Args[0]
+	b := v.Block
+	typ := &b.Func.Config.Types
+	// match: (Select0 (Add64carry x y c))
+	// result: (ADD (ADD <typ.UInt64> x y) c)
+	for {
+		if v_0.Op != OpAdd64carry {
+			break
+		}
+		c := v_0.Args[2]
+		x := v_0.Args[0]
+		y := v_0.Args[1]
+		v.reset(OpRISCV64ADD)
+		v0 := b.NewValue0(v.Pos, OpRISCV64ADD, typ.UInt64)
+		v0.AddArg2(x, y)
+		v.AddArg2(v0, c)
+		return true
+	}
+	// match: (Select0 (Sub64borrow x y c))
+	// result: (SUB (SUB <typ.UInt64> x y) c)
+	for {
+		if v_0.Op != OpSub64borrow {
+			break
+		}
+		c := v_0.Args[2]
+		x := v_0.Args[0]
+		y := v_0.Args[1]
+		v.reset(OpRISCV64SUB)
+		v0 := b.NewValue0(v.Pos, OpRISCV64SUB, typ.UInt64)
+		v0.AddArg2(x, y)
+		v.AddArg2(v0, c)
+		return true
+	}
+	// match: (Select0 m:(LoweredMuluhilo x y))
+	// cond: m.Uses == 1
+	// result: (MULHU x y)
+	for {
+		m := v_0
+		if m.Op != OpRISCV64LoweredMuluhilo {
+			break
+		}
+		y := m.Args[1]
+		x := m.Args[0]
+		if !(m.Uses == 1) {
+			break
+		}
+		v.reset(OpRISCV64MULHU)
+		v.AddArg2(x, y)
+		return true
+	}
+	return false
+}
+func rewriteValueRISCV64_OpSelect1(v *Value) bool {
+	v_0 := v.Args[0]
+	b := v.Block
+	typ := &b.Func.Config.Types
+	// match: (Select1 (Add64carry x y c))
+	// result: (OR (SLTU <typ.UInt64> s:(ADD <typ.UInt64> x y) x) (SLTU <typ.UInt64> (ADD <typ.UInt64> s c) s))
+	for {
+		if v_0.Op != OpAdd64carry {
+			break
+		}
+		c := v_0.Args[2]
+		x := v_0.Args[0]
+		y := v_0.Args[1]
+		v.reset(OpRISCV64OR)
+		v0 := b.NewValue0(v.Pos, OpRISCV64SLTU, typ.UInt64)
+		s := b.NewValue0(v.Pos, OpRISCV64ADD, typ.UInt64)
+		s.AddArg2(x, y)
+		v0.AddArg2(s, x)
+		v2 := b.NewValue0(v.Pos, OpRISCV64SLTU, typ.UInt64)
+		v3 := b.NewValue0(v.Pos, OpRISCV64ADD, typ.UInt64)
+		v3.AddArg2(s, c)
+		v2.AddArg2(v3, s)
+		v.AddArg2(v0, v2)
+		return true
+	}
+	// match: (Select1 (Sub64borrow x y c))
+	// result: (OR (SLTU <typ.UInt64> x s:(SUB <typ.UInt64> x y)) (SLTU <typ.UInt64> s (SUB <typ.UInt64> s c)))
+	for {
+		if v_0.Op != OpSub64borrow {
+			break
+		}
+		c := v_0.Args[2]
+		x := v_0.Args[0]
+		y := v_0.Args[1]
+		v.reset(OpRISCV64OR)
+		v0 := b.NewValue0(v.Pos, OpRISCV64SLTU, typ.UInt64)
+		s := b.NewValue0(v.Pos, OpRISCV64SUB, typ.UInt64)
+		s.AddArg2(x, y)
+		v0.AddArg2(x, s)
+		v2 := b.NewValue0(v.Pos, OpRISCV64SLTU, typ.UInt64)
+		v3 := b.NewValue0(v.Pos, OpRISCV64SUB, typ.UInt64)
+		v3.AddArg2(s, c)
+		v2.AddArg2(s, v3)
+		v.AddArg2(v0, v2)
+		return true
+	}
+	// match: (Select1 m:(LoweredMuluhilo x y))
+	// cond: m.Uses == 1
+	// result: (MUL x y)
+	for {
+		m := v_0
+		if m.Op != OpRISCV64LoweredMuluhilo {
+			break
+		}
+		y := m.Args[1]
+		x := m.Args[0]
+		if !(m.Uses == 1) {
+			break
+		}
+		v.reset(OpRISCV64MUL)
+		v.AddArg2(x, y)
+		return true
+	}
+	return false
+}
 func rewriteValueRISCV64_OpSlicemask(v *Value) bool {
 	v_0 := v.Args[0]
 	b := v.Block
@@ -6481,6 +6681,7 @@ func rewriteValueRISCV64_OpZero(v *Value) bool {
 	}
 }
 func rewriteBlockRISCV64(b *Block) bool {
+	typ := &b.Func.Config.Types
 	switch b.Kind {
 	case BlockRISCV64BEQ:
 		// match: (BEQ (MOVDconst [0]) cond yes no)
@@ -6688,10 +6889,12 @@ func rewriteBlockRISCV64(b *Block) bool {
 		}
 	case BlockIf:
 		// match: (If cond yes no)
-		// result: (BNEZ cond yes no)
+		// result: (BNEZ (MOVBUreg <typ.UInt64> cond) yes no)
 		for {
 			cond := b.Controls[0]
-			b.resetWithControl(BlockRISCV64BNEZ, cond)
+			v0 := b.NewValue0(cond.Pos, OpRISCV64MOVBUreg, typ.UInt64)
+			v0.AddArg(cond)
+			b.resetWithControl(BlockRISCV64BNEZ, v0)
 			return true
 		}
 	}

@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"reflect"
+	"strconv"
 	"sync"
 	"unicode/utf8"
 )
@@ -55,7 +56,7 @@ type Formatter interface {
 }
 
 // Stringer is implemented by any value that has a String method,
-// which defines the ``native'' format for that value.
+// which defines the “native” format for that value.
 // The String method is used to print values passed as an operand
 // to any format that accepts a string or to an unformatted printer
 // such as Print.
@@ -69,6 +70,31 @@ type Stringer interface {
 // to a %#v format.
 type GoStringer interface {
 	GoString() string
+}
+
+// FormatString returns a string representing the fully qualified formatting
+// directive captured by the State, followed by the argument verb. (State does not
+// itself contain the verb.) The result has a leading percent sign followed by any
+// flags, the width, and the precision. Missing flags, width, and precision are
+// omitted. This function allows a Formatter to reconstruct the original
+// directive triggering the call to Format.
+func FormatString(state State, verb rune) string {
+	var tmp [16]byte // Use a local buffer.
+	b := append(tmp[:0], '%')
+	for _, c := range " +-#0" { // All known flags
+		if state.Flag(int(c)) { // The argument is an int for historical reasons.
+			b = append(b, byte(c))
+		}
+	}
+	if w, ok := state.Width(); ok {
+		b = strconv.AppendInt(b, int64(w), 10)
+	}
+	if p, ok := state.Precision(); ok {
+		b = append(b, '.')
+		b = strconv.AppendInt(b, int64(p), 10)
+	}
+	b = utf8.AppendRune(b, verb)
+	return string(b)
 }
 
 // Use simple []byte instead of bytes.Buffer to avoid large dependency.
@@ -222,6 +248,16 @@ func Sprintf(format string, a ...any) string {
 	return s
 }
 
+// Appendf formats according to a format specifier, appends the result to the byte
+// slice, and returns the updated slice.
+func Appendf(b []byte, format string, a ...any) []byte {
+	p := newPrinter()
+	p.doPrintf(format, a)
+	b = append(b, p.buf...)
+	p.free()
+	return b
+}
+
 // These routines do not take a format string
 
 // Fprint formats using the default formats for its operands and writes to w.
@@ -250,6 +286,16 @@ func Sprint(a ...any) string {
 	s := string(p.buf)
 	p.free()
 	return s
+}
+
+// Append formats using the default formats for its operands, appends the result to
+// the byte slice, and returns the updated slice.
+func Append(b []byte, a ...any) []byte {
+	p := newPrinter()
+	p.doPrint(a)
+	b = append(b, p.buf...)
+	p.free()
+	return b
 }
 
 // These routines end in 'ln', do not take a format string,
@@ -282,6 +328,17 @@ func Sprintln(a ...any) string {
 	s := string(p.buf)
 	p.free()
 	return s
+}
+
+// Appendln formats using the default formats for its operands, appends the result
+// to the byte slice, and returns the updated slice. Spaces are always added
+// between operands and a newline is appended.
+func Appendln(b []byte, a ...any) []byte {
+	p := newPrinter()
+	p.doPrintln(a)
+	b = append(b, p.buf...)
+	p.free()
+	return b
 }
 
 // getField gets the i'th field of the struct value.

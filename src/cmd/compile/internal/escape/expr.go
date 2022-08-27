@@ -100,9 +100,9 @@ func (e *escape) exprSkipInit(k hole, n ir.Node) {
 
 	case ir.OCONV, ir.OCONVNOP:
 		n := n.(*ir.ConvExpr)
-		if ir.ShouldCheckPtr(e.curfn, 2) && n.Type().IsUnsafePtr() && n.X.Type().IsPtr() {
-			// When -d=checkptr=2 is enabled, treat
-			// conversions to unsafe.Pointer as an
+		if (ir.ShouldCheckPtr(e.curfn, 2) || ir.ShouldAsanCheckPtr(e.curfn)) && n.Type().IsUnsafePtr() && n.X.Type().IsPtr() {
+			// When -d=checkptr=2 or -asan is enabled,
+			// treat conversions to unsafe.Pointer as an
 			// escaping operation. This allows better
 			// runtime instrumentation, since we can more
 			// easily detect object boundaries on the heap
@@ -123,7 +123,7 @@ func (e *escape) exprSkipInit(k hole, n ir.Node) {
 		n := n.(*ir.BinaryExpr)
 		// Note: n.X is not needed because it can never point to memory that might escape.
 		e.expr(k, n.Y)
-	case ir.OIDATA, ir.OSPTR:
+	case ir.OITAB, ir.OIDATA, ir.OSPTR:
 		n := n.(*ir.UnaryExpr)
 		e.expr(k, n.X)
 	case ir.OSLICE2ARRPTR:
